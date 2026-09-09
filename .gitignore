@@ -1,0 +1,14 @@
+# Dependencies
+node_modules/
+
+# Build output
+out/
+src-tauri/target/
+src-tauri/gen/schemas/
+
+# Test output
+out-test/
+
+# OS / editor
+.DS_Store
+*.log

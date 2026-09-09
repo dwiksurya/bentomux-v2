@@ -1,0 +1,652 @@
+/* ---------------- persisted app state (app_data_dir/bentomux.json) ----------------
+   Rust port of src/main/store.ts. Owned by the backend; the renderer
+   reaches it only through Tauri commands. All structs serialize in the
+   exact camelCase JSON shape the Electron version wrote, so existing
+   bentomux.json files load unchanged. */
+
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+
+use crate::split_tree::{first_leaf_id, tree_from_legacy, Dir, PaneNode};
+
+const VERSION: u32 = 5;
+
+/* ---------------- shared type contract (src/shared/types.ts) ---------------- */
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct WorkspaceRec {
+    pub id: String,
+    pub path: String,
+    pub name: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TabRec {
+    pub id: String,
+    pub workspace_id: String,
+    /* split view layout; absent when the tab holds a single pane.
+       id is always the first (topmost-leftmost) leaf of the tree. */
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub split_tree: Option<PaneNode>,
+    /* custom tab title; absent/empty falls back to branch or workspace name */
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum ResourceKind {
+    #[serde(rename = "memory")]
+    Memory,
+    #[serde(rename = "skills")]
+    Skills,
+    #[serde(rename = "mcp")]
+    Mcp,
+}
+
+/* user-resized approval overlay window (px); absent = built-in default */
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct OverlaySize {
+    pub w: f64,
+    pub h: f64,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RemotePrefs {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    /* pairing token embedded in the QR URL; generated on first enable so
+       paired devices survive restarts */
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Prefs {
+    pub theme: Option<String>,
+    pub palette: Option<String>,
+    /* terminal font family (CSS font stack) + size in px; absent = built-in default */
+    pub font: Option<String>,
+    pub font_size: Option<f64>,
+    /* shell for NEW terminals; absent = auto-detect (pwsh → powershell → cmd) */
+    pub shell: Option<String>,
+    /* app-shortcut overrides: action id → accelerator ("ctrl+shift+k") */
+    pub shortcuts: Option<HashMap<String, String>>,
+    pub pane_hidden: Option<bool>,
+    pub sidebar_width: Option<f64>,
+    pub expanded: Option<HashMap<String, bool>>,
+    /* last custom tab title per workspace; new tabs inherit it so closing
+       a tab never loses the name */
+    pub tab_titles: Option<HashMap<String, String>>,
+    /* user-resized approval overlay window (px); absent = built-in default */
+    pub approval_overlay: Option<OverlaySize>,
+    /* agent approval notifications; absent = enabled (overlay pop + chime) */
+    pub notif_enabled: Option<bool>,
+    pub notif_sound: Option<bool>,
+    /* remote monitor (phone browser); absent = disabled */
+    pub remote: Option<RemotePrefs>,
+}
+
+impl Default for Prefs {
+    fn default() -> Self {
+        Prefs {
+            theme: Some("light".to_string()),
+            palette: Some("default".to_string()),
+            font: None,
+            font_size: None,
+            shell: None,
+            shortcuts: None,
+            pane_hidden: Some(false),
+            sidebar_width: Some(248.0),
+            expanded: Some(HashMap::new()),
+            tab_titles: None,
+            approval_overlay: None,
+            notif_enabled: None,
+            notif_sound: None,
+            remote: None,
+        }
+    }
+}
+
+/* toggle-off definitions with no native flag in the agent's own config
+   live here so toggling back on restores them exactly */
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourceSnapshot {
+    pub kind: ResourceKind,
+    pub name: String,
+    pub updated_at: u64,
+    pub data: serde_json::Map<String, serde_json::Value>,
+}
+
+/* AgentId → ResourceKind → resource id → snapshot */
+pub type ShadowStore = HashMap<String, HashMap<ResourceKind, HashMap<String, ResourceSnapshot>>>;
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Capabilities {
+    pub memory: bool,
+    pub skills: bool,
+    pub mcp: bool,
+}
+
+impl Default for Capabilities {
+    fn default() -> Self {
+        Capabilities { memory: false, skills: false, mcp: false }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct AgentInfo {
+    pub id: String,
+    pub name: String,
+    pub detected: bool,
+    pub capabilities: Capabilities,
+    /* the agent's current default model, if any (null when no model form) */
+    pub current_model: Option<String>,
+    /* config file path the adapter writes to; null when read-only */
+    pub config_path: Option<String>,
+}
+
+impl Default for AgentInfo {
+    fn default() -> Self {
+        AgentInfo {
+            id: String::new(),
+            name: String::new(),
+            detected: false,
+            capabilities: Capabilities::default(),
+            current_model: None,
+            config_path: None,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct AppState {
+    pub version: u32,
+    pub workspaces: Vec<WorkspaceRec>,
+    pub open_tabs: Vec<TabRec>,
+    pub active_workspace_id: Option<String>,
+    pub shadow: ShadowStore,
+    pub prefs: Prefs,
+    /* detected agent runtimes; populated on boot + on every agents:list
+       command so the sidebar/detail page can render without a separate fetch */
+    pub agents: Vec<AgentInfo>,
+}
+
+impl Default for AppState {
+    fn default() -> Self {
+        AppState {
+            version: VERSION,
+            workspaces: vec![],
+            open_tabs: vec![],
+            active_workspace_id: None,
+            shadow: HashMap::new(),
+            prefs: Prefs::default(),
+            agents: vec![],
+        }
+    }
+}
+
+/* ---------------- tabs persisted before layout trees existed ----------------
+   carried flat extraIds; migrate into a split tree like normTab() did */
+
+fn norm_tab(o: &serde_json::Value) -> Option<TabRec> {
+    let id = o.get("id").and_then(|v| v.as_str())?;
+    let workspace_id = o.get("workspaceId").and_then(|v| v.as_str())?;
+
+    let title = o
+        .get("title")
+        .and_then(|v| v.as_str())
+        .filter(|t| !t.trim().is_empty())
+        .map(|t| t.to_string());
+
+    let split_tree = match o.get("splitTree") {
+        Some(v) if v.is_object() => serde_json::from_value::<PaneNode>(v.clone()).ok(),
+        _ => None,
+    };
+
+    let mut tab = TabRec {
+        id: id.to_string(),
+        workspace_id: workspace_id.to_string(),
+        split_tree,
+        title,
+    };
+
+    if tab.split_tree.is_none() {
+        let extra_ids: Vec<String> = o
+            .get("extraIds")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+        if !extra_ids.is_empty() {
+            let dir = match o.get("splitDir").and_then(|v| v.as_str()) {
+                Some("h") => Dir::H,
+                _ => Dir::V,
+            };
+            let mut ids = vec![id.to_string()];
+            ids.extend(extra_ids);
+            if let Some(tree) = tree_from_legacy(&ids, Some(dir)) {
+                tab.id = first_leaf_id(&tree).to_string();
+                tab.split_tree = Some(tree);
+            }
+        }
+    }
+
+    Some(tab)
+}
+
+/* ---------------- state manager ---------------- */
+
+pub struct AppStateManager {
+    state: Mutex<AppState>,
+    path: PathBuf,
+}
+
+impl AppStateManager {
+    /* wires the store to the Tauri app data dir (userData equivalent) */
+    pub fn with_app_handle(app: &tauri::AppHandle) -> Self {
+        use tauri::Manager;
+        let dir = app
+            .path()
+            .app_data_dir()
+            .unwrap_or_else(|_| PathBuf::from("."));
+        Self::new(dir.join("bentomux.json"))
+    }
+
+    pub fn new(path: PathBuf) -> Self {
+        let mut state = AppState::default();
+        if !load_from(&mut state, &path) {
+            /* first run after the rebrand: adopt the pre-rebrand store so the
+               user's workspaces/tabs/prefs survive the rename */
+            if let Some(parent) = path.parent() {
+                let legacy = parent
+                    .parent()
+                    .unwrap_or(parent)
+                    .join("Takora")
+                    .join("takora.json");
+                load_from(&mut state, &legacy);
+            }
+        }
+        /* palettes renamed before the rebrand: map stale values over */
+        if state.prefs.palette.as_deref() == Some("takora") {
+            state.prefs.palette = Some("default".to_string());
+        }
+        if state.prefs.palette.as_deref() == Some("pixel") {
+            state.prefs.palette = Some("classic".to_string());
+        }
+        let mgr = AppStateManager { state: Mutex::new(state), path };
+        let st = mgr.state.lock().unwrap().clone();
+        persist(&mgr.path, &st);
+        mgr
+    }
+
+    pub fn get_state(&self) -> AppState {
+        self.state.lock().unwrap().clone()
+    }
+
+    /* every mutation goes through here so each change is persisted */
+    pub fn patch_state<F>(&self, updater: F) -> AppState
+    where
+        F: FnOnce(&mut AppState),
+    {
+        let mut state = self.state.lock().unwrap();
+        updater(&mut state);
+        persist(&self.path, &state);
+        state.clone()
+    }
+
+    pub fn patch_prefs<F>(&self, updater: F) -> AppState
+    where
+        F: FnOnce(&mut Prefs),
+    {
+        self.patch_state(|s| updater(&mut s.prefs))
+    }
+
+    pub fn shadow_for(
+        &self,
+        agent_id: &str,
+    ) -> HashMap<ResourceKind, HashMap<String, ResourceSnapshot>> {
+        self.state
+            .lock()
+            .unwrap()
+            .shadow
+            .get(agent_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub fn set_snapshot(
+        &self,
+        agent_id: &str,
+        kind: ResourceKind,
+        id: &str,
+        snap: Option<ResourceSnapshot>,
+    ) {
+        self.patch_state(|s| {
+            let per_agent = s.shadow.entry(agent_id.to_string()).or_default();
+            let per_kind = per_agent.entry(kind.clone()).or_default();
+            match snap {
+                Some(snap) => {
+                    per_kind.insert(id.to_string(), snap);
+                }
+                None => {
+                    per_kind.remove(id);
+                }
+            }
+            if per_kind.is_empty() {
+                per_agent.remove(&kind);
+            }
+            if per_agent.is_empty() {
+                s.shadow.remove(agent_id);
+            }
+        });
+    }
+}
+
+/* parse + adopt one store file; false when missing/unreadable.
+   Same-version AND older files are adopted forward-only: keep the user's
+   workspaces/tabs/prefs/shadow and add new fields with their defaults. */
+fn load_from(state: &mut AppState, path: &Path) -> bool {
+    let Ok(content) = fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(raw) = serde_json::from_str::<serde_json::Value>(&content) else {
+        /* missing or unreadable file: nothing to adopt */
+        return false;
+    };
+
+    let version = raw.get("version").and_then(|v| v.as_u64());
+    match version {
+        Some(v) if v == VERSION as u64 => adopt(state, &raw),
+        Some(v) if (v as u32) < VERSION => adopt(state, &raw),
+        _ => {}
+    }
+    true
+}
+
+/* spread raw over the defaults field-by-field (the {...state, ...raw}
+   semantics of the TypeScript version), with legacy tabs normalized */
+fn adopt(state: &mut AppState, raw: &serde_json::Value) {
+    let mut patched: AppState =
+        serde_json::from_value(raw.clone()).unwrap_or_else(|_| AppState::default());
+    if let Some(tabs) = raw.get("openTabs").and_then(|v| v.as_array()) {
+        patched.open_tabs = tabs.iter().filter_map(norm_tab).collect();
+    }
+    if raw.get("shadow").map(|v| v.is_null()).unwrap_or(true) {
+        patched.shadow = HashMap::new();
+    }
+    patched.version = raw
+        .get("version")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(VERSION as u64) as u32;
+    *state = patched;
+}
+
+/* atomic-ish write: tmp file → backup → rename, like the Electron persist() */
+fn persist(path: &Path, state: &AppState) {
+    let write = || -> Result<(), String> {
+        if let Some(dir) = path.parent() {
+            fs::create_dir_all(dir).map_err(|e| format!("mkdir failed: {}", e))?;
+        }
+        let json = serde_json::to_string_pretty(state)
+            .map_err(|e| format!("serialize failed: {}", e))?;
+        let tmp = path.with_extension("json.tmp");
+        fs::write(&tmp, json).map_err(|e| format!("write failed: {}", e))?;
+        if path.exists() {
+            let bak = path.with_extension("json.bak");
+            fs::rename(path, &bak).map_err(|e| format!("backup failed: {}", e))?;
+        }
+        fs::rename(&tmp, path).map_err(|e| format!("rename failed: {}", e))?;
+        Ok(())
+    };
+    if let Err(e) = write() {
+        eprintln!("[bentomux] persist failed: {}", e);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::split_tree::leaf_node;
+
+    fn temp_path(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "bentomux-test-{}-{}",
+            tag,
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir.join("bentomux.json")
+    }
+
+    fn cleanup(path: &Path) {
+        if let Some(dir) = path.parent() {
+            fs::remove_dir_all(dir).ok();
+        }
+    }
+
+    #[test]
+    fn test_defaults_match_electron() {
+        let path = temp_path("defaults");
+        let mgr = AppStateManager::new(path.clone());
+        let st = mgr.get_state();
+        assert_eq!(st.version, 5);
+        assert!(st.workspaces.is_empty());
+        assert!(st.open_tabs.is_empty());
+        assert_eq!(st.active_workspace_id, None);
+        assert_eq!(st.prefs.theme.as_deref(), Some("light"));
+        assert_eq!(st.prefs.palette.as_deref(), Some("default"));
+        assert_eq!(st.prefs.pane_hidden, Some(false));
+        assert_eq!(st.prefs.sidebar_width, Some(248.0));
+        assert!(st.prefs.expanded.as_ref().unwrap().is_empty());
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_patch_state_persists_across_reload() {
+        let path = temp_path("patch");
+        {
+            let mgr = AppStateManager::new(path.clone());
+            mgr.patch_state(|s| {
+                s.workspaces.push(WorkspaceRec {
+                    id: "ws-1".into(),
+                    path: "/tmp/proj".into(),
+                    name: "proj".into(),
+                });
+                s.active_workspace_id = Some("ws-1".into());
+            });
+            mgr.patch_prefs(|p| {
+                p.theme = Some("dark".into());
+                p.font_size = Some(14.0);
+            });
+        }
+        let mgr = AppStateManager::new(path.clone());
+        let st = mgr.get_state();
+        assert_eq!(st.workspaces.len(), 1);
+        assert_eq!(st.workspaces[0].name, "proj");
+        assert_eq!(st.active_workspace_id.as_deref(), Some("ws-1"));
+        assert_eq!(st.prefs.theme.as_deref(), Some("dark"));
+        assert_eq!(st.prefs.font_size, Some(14.0));
+        cleanup(&path);
+    }
+
+    /* tabs persisted before layout trees existed carried flat extraIds */
+    #[test]
+    fn test_legacy_tab_extra_ids_migration() {
+        let path = temp_path("legacy-tab");
+        fs::write(
+            &path,
+            serde_json::json!({
+                "version": 5,
+                "openTabs": [{
+                    "id": "t1", "workspaceId": "ws-1",
+                    "extraIds": ["t2", "t3"], "splitDir": "h"
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let mgr = AppStateManager::new(path.clone());
+        let st = mgr.get_state();
+        assert_eq!(st.open_tabs.len(), 1);
+        let tab = &st.open_tabs[0];
+        assert_eq!(tab.id, "t1");
+        let tree = tab.split_tree.as_ref().unwrap();
+        assert_eq!(
+            crate::split_tree::leaf_ids(tree),
+            vec!["t1".to_string(), "t2".to_string(), "t3".to_string()]
+        );
+        assert!(matches!(tree, PaneNode::Split { dir: Dir::H, .. }));
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_blank_title_dropped() {
+        let path = temp_path("blank-title");
+        fs::write(
+            &path,
+            serde_json::json!({
+                "version": 5,
+                "openTabs": [
+                    { "id": "t1", "workspaceId": "ws-1", "title": "   " },
+                    { "id": "t2", "workspaceId": "ws-1", "title": "real" }
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let mgr = AppStateManager::new(path.clone());
+        let st = mgr.get_state();
+        assert_eq!(st.open_tabs[0].title, None);
+        assert_eq!(st.open_tabs[1].title.as_deref(), Some("real"));
+        cleanup(&path);
+    }
+
+    /* forward-only: old bentomux.json never loses data on an upgrade */
+    #[test]
+    fn test_older_version_adopts_user_data() {
+        let path = temp_path("v4");
+        fs::write(
+            &path,
+            serde_json::json!({
+                "version": 4,
+                "workspaces": [{ "id": "w1", "path": "/x", "name": "x" }],
+                "prefs": { "theme": "dark" },
+                "shadow": {}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let mgr = AppStateManager::new(path.clone());
+        let st = mgr.get_state();
+        assert_eq!(st.workspaces.len(), 1);
+        assert_eq!(st.prefs.theme.as_deref(), Some("dark"));
+        /* new fields arrive with their defaults */
+        assert_eq!(st.prefs.palette.as_deref(), Some("default"));
+        assert!(st.agents.is_empty());
+        cleanup(&path);
+    }
+
+    /* palettes renamed before the rebrand: map stale values over */
+    #[test]
+    fn test_palette_rename() {
+        let path = temp_path("palette");
+        fs::write(
+            &path,
+            serde_json::json!({
+                "version": 5,
+                "prefs": { "palette": "takora" }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let mgr = AppStateManager::new(path.clone());
+        assert_eq!(mgr.get_state().prefs.palette.as_deref(), Some("default"));
+
+        fs::write(
+            &path,
+            serde_json::json!({
+                "version": 5,
+                "prefs": { "palette": "pixel" }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let mgr = AppStateManager::new(path);
+        assert_eq!(mgr.get_state().prefs.palette.as_deref(), Some("classic"));
+    }
+
+    #[test]
+    fn test_snapshot_set_and_remove() {
+        let path = temp_path("shadow");
+        let mgr = AppStateManager::new(path.clone());
+        let snap = ResourceSnapshot {
+            kind: ResourceKind::Skills,
+            name: "review".into(),
+            updated_at: 42,
+            data: serde_json::json!({ "instructions": "hi" })
+                .as_object()
+                .unwrap()
+                .clone(),
+        };
+        mgr.set_snapshot("claude", ResourceKind::Skills, "review", Some(snap));
+        assert!(mgr.shadow_for("claude").contains_key(&ResourceKind::Skills));
+        assert_eq!(
+            mgr.get_state().shadow["claude"][&ResourceKind::Skills]["review"].name,
+            "review"
+        );
+
+        mgr.set_snapshot("claude", ResourceKind::Skills, "review", None);
+        assert!(mgr.shadow_for("claude").is_empty());
+        /* empty branches are pruned, not left behind */
+        assert!(!mgr.get_state().shadow.contains_key("claude"));
+        cleanup(&path);
+    }
+
+    /* broken/missing files must not take the app down: defaults win */
+    #[test]
+    fn test_unreadable_file_falls_back_to_defaults() {
+        let path = temp_path("broken");
+        fs::write(&path, "not json at all {{{").unwrap();
+        let mgr = AppStateManager::new(path.clone());
+        let st = mgr.get_state();
+        assert_eq!(st.version, 5);
+        assert!(st.workspaces.is_empty());
+        cleanup(&path);
+    }
+
+    /* JSON on disk must match the Electron camelCase contract exactly */
+    #[test]
+    fn test_json_shape_is_camel_case() {
+        let path = temp_path("shape");
+        let mgr = AppStateManager::new(path.clone());
+        mgr.patch_state(|s| {
+            s.open_tabs.push(TabRec {
+                id: "t1".into(),
+                workspace_id: "ws-1".into(),
+                split_tree: Some(leaf_node("t1")),
+                title: Some("dev".into()),
+            });
+        });
+        let raw: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let tab = &raw["openTabs"][0];
+        assert_eq!(tab["workspaceId"], "ws-1");
+        assert_eq!(tab["title"], "dev");
+        assert!(tab.get("split_tree").is_none()); /* only camelCase splitTree */
+        assert!(tab["splitTree"].is_object());
+        assert_eq!(raw["activeWorkspaceId"], serde_json::Value::Null);
+        cleanup(&path);
+    }
+}

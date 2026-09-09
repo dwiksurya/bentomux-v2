@@ -1,0 +1,303 @@
+/* ============================================================
+   Bentomux — calm desktop for AI agent runtime workspaces.
+   Entry point: root render, content dispatch, shell wiring, boot.
+   ============================================================ */
+
+import '../styles.css';
+/* side-effect import: installs `window.bentomux` (the typed IPC bridge)
+   before any view module references it. */
+import '../preload/bentomux';
+import { $, $$, h } from './dom';
+import { rel, abs } from './time';
+import { ui, type Route, type TabEntry } from './state';
+import { db, setDb, branches, runtime, activity } from './store';
+import { registerRenderers, render } from './render';
+import { renderTabs, activate, stepHistory, registerRestoredTab } from './views/tabs';
+import { renderSidebar, toggleGitPanel } from './views/sidebar';
+import { agentsPage, agentDetailPage } from './views/agents';
+import { initTerminalEvents, terminalPage, applyTerminalFont } from './views/terminal';
+import { initKeyboard } from './keyboard';
+import { diffPage } from './views/diff';
+import { refreshChangesPill } from './views/gitPanel';
+import { initAgentEvents } from './views/agent-events';
+document.documentElement.classList.toggle('macos', /Mac/.test(navigator.platform));
+
+const MIN_SIDEBAR_WIDTH = 248;
+const MAX_SIDEBAR_RATIO = 0.5;
+
+/* ---------------- render root ---------------- */
+
+const PALETTE_CLASSES = ['palette-catppuccin', 'palette-rose-pine', 'palette-gruvbox', 'palette-dracula', 'palette-nord', 'palette-classic', 'palette-eink'];
+
+function applyPaletteClass(palette: string | undefined): void {
+  const root = document.documentElement;
+  for (const c of PALETTE_CLASSES) root.classList.remove(c);
+  if (palette && palette !== 'default') root.classList.add('palette-' + palette);
+}
+
+function applyFontPrefs(): void {
+  const root = document.documentElement;
+  if (db.prefs.font) root.style.setProperty('--term-font', db.prefs.font);
+  else root.style.removeProperty('--term-font');
+  if (db.prefs.fontSize) root.style.setProperty('--term-font-size', db.prefs.fontSize + 'px');
+  else root.style.removeProperty('--term-font-size');
+}
+
+function applyShellPrefs(): void {
+  document.documentElement.style.setProperty('--sidebar-width', (db.prefs.sidebarWidth || MIN_SIDEBAR_WIDTH) + 'px');
+  document.title = 'Bentomux';
+  document.body.classList.toggle('pane-hidden', db.prefs.paneHidden === true);
+  document.body.classList.toggle('git-panel-open', ui.gitPanelOpen);
+  document.documentElement.classList.toggle('dark', db.prefs.theme === 'dark');
+  applyPaletteClass(db.prefs.palette);
+  applyFontPrefs();
+  $('#sidebar').classList.toggle('open', ui.sidebarOpen);
+  $('#scrim').classList.toggle('show', ui.sidebarOpen);
+}
+
+function renderRoot(): void {
+  applyShellPrefs();
+  renderSidebar();
+  renderTabs();
+  renderContentInner(ui.route);
+}
+
+function findTerminalEntry(route: Route): TabEntry | undefined {
+  if (route.view !== 'terminal') return undefined;
+  return ui.tabs.find(t => t.route.view === 'terminal' && (t.route === route || t.route.tabId === route.tabId));
+}
+
+function renderContentInner(route: Route): void {
+  console.log('[DEBUG main] renderContentInner called with route:', route);
+  const c = $('#content');
+  const body = $('#tabbody');
+  c.classList.remove('full');
+  c.classList.remove('fullbleed');
+
+  if (route.view === 'terminal') {
+    const entry = findTerminalEntry(route);
+    console.log('[DEBUG main] Terminal route, entry:', entry);
+    const exists = !!entry || db.openTabs.some(t => t.id === route.tabId);
+    console.log('[DEBUG main] Terminal exists:', exists);
+    c.classList.add('full');
+    body.innerHTML = '';
+    const start = entry && entry.route.view === 'terminal' ? (entry.tree ?? entry.route.tabId) : route.tabId;
+    console.log('[DEBUG main] start value:', start);
+    console.log('[DEBUG main] Calling terminalPage...');
+    const result = terminalPage(start);
+    console.log('[DEBUG main] terminalPage returned:', result);
+    console.log('[DEBUG main] typeof result:', typeof result);
+    body.append(exists ? result : h('div', { class: 'page' }, h('p', {}, 'Terminal not found.')));
+  } else if (route.view === 'agents') {
+    body.innerHTML = '';
+    body.append(agentsPage());
+  } else if (route.view === 'agentDetail') {
+    body.innerHTML = '';
+    body.append(agentDetailPage(route.agentId, route.tab));
+  } else if (route.view === 'diff') {
+    c.classList.add('fullbleed');
+    body.innerHTML = '';
+    body.append(diffPage(route.workspaceId, route.path));
+  } else {
+    body.innerHTML = '';
+    body.append(h('div', { class: 'page' }, h('p', {}, 'Unknown view.')));
+  }
+}
+
+/* ---------------- app bar wiring ---------------- */
+
+function togglePaneHidden(): void {
+  db.prefs.paneHidden = !(db.prefs.paneHidden === true);
+  void window.bentomux.setPrefs({ paneHidden: db.prefs.paneHidden });
+  document.body.classList.toggle('pane-hidden', db.prefs.paneHidden === true);
+}
+
+function wirePaneToggle(): void {
+  $('#paneBtn').addEventListener('click', togglePaneHidden);
+  $('#paneTopBtn').addEventListener('click', togglePaneHidden);
+}
+
+function wireHistory(): void {
+  $('#backBtn').addEventListener('click', () => stepHistory(-1));
+  $('#redoBtn').addEventListener('click', () => stepHistory(1));
+  $('#backTopBtn').addEventListener('click', () => stepHistory(-1));
+  $('#redoTopBtn').addEventListener('click', () => stepHistory(1));
+}
+
+function wireScrim(): void {
+  $('#scrim').addEventListener('pointerdown', () => { ui.sidebarOpen = false; render(); });
+}
+
+function toggleTheme(): void {
+  db.prefs.theme = db.prefs.theme === 'dark' ? 'light' : 'dark';
+  void window.bentomux.setPrefs({ theme: db.prefs.theme });
+  document.documentElement.classList.toggle('dark', db.prefs.theme === 'dark');
+  render(); /* terminals re-theme in place */
+}
+
+export function setThemeMode(mode: 'light' | 'dark'): void {
+  if (db.prefs.theme === mode) return;
+  db.prefs.theme = mode;
+  void window.bentomux.setPrefs({ theme: mode });
+  document.documentElement.classList.toggle('dark', mode === 'dark');
+  render();
+}
+
+export function setPalette(palette: import('../shared/types').PaletteName): void {
+  if (db.prefs.palette === palette) return;
+  db.prefs.palette = palette;
+  void window.bentomux.setPrefs({ palette });
+  applyPaletteClass(palette);
+  render();
+}
+
+export function setTerminalFont(font: string | null | undefined): void {
+  db.prefs.font = font === null ? undefined : (font || undefined);
+  void window.bentomux.setPrefs({ font: font === null ? null : db.prefs.font });
+  applyFontPrefs();
+  applyTerminalFont();
+}
+
+export function setTerminalFontSize(size: number | undefined): void {
+  db.prefs.fontSize = size;
+  void window.bentomux.setPrefs({ fontSize: db.prefs.fontSize });
+  applyFontPrefs();
+  applyTerminalFont();
+}
+
+function wireTheme(): void {
+  $('#themeBtn').addEventListener('click', toggleTheme);
+}
+
+function wireWindowControls(): void {
+  window.bentomux.onMaximized(max => {
+    ui.maximized = max;
+    document.body.classList.toggle('maximized', max);
+  });
+}
+
+function clampSidebarWidth(clientX: number): number {
+  return Math.max(MIN_SIDEBAR_WIDTH, Math.min(window.innerWidth * MAX_SIDEBAR_RATIO, clientX));
+}
+
+function wireSidebarResize(): void {
+  const resize = $('#sidebarResize');
+  let resizing = false;
+  resize.addEventListener('pointerdown', e => {
+    if (window.matchMedia('(max-width:900px)').matches) return;
+    resizing = true;
+    resize.setPointerCapture(e.pointerId);
+    document.body.classList.add('resizing-sidebar');
+  });
+  resize.addEventListener('pointermove', e => {
+    if (!resizing) return;
+    db.prefs.sidebarWidth = clampSidebarWidth(e.clientX);
+    document.documentElement.style.setProperty('--sidebar-width', db.prefs.sidebarWidth + 'px');
+  });
+  resize.addEventListener('pointerup', () => {
+    if (!resizing) return;
+    resizing = false;
+    void window.bentomux.setPrefs({ sidebarWidth: db.prefs.sidebarWidth });
+    document.body.classList.remove('resizing-sidebar');
+  });
+}
+
+function wireAppBar(): void {
+  wirePaneToggle();
+  wireHistory();
+  wireScrim();
+  wireTheme();
+  wireWindowControls();
+  wireSidebarResize();
+  wireGitPill();
+}
+
+function wireGitPill(): void {
+  const pill = document.getElementById('gitChangesPill');
+  if (!pill) return;
+  pill.addEventListener('click', () => toggleGitPanel());
+}
+
+registerRenderers({ root: renderRoot, content: renderContentInner, sidebar: renderSidebar });
+
+/* ---------------- clock: refresh relative times ---------------- */
+
+setInterval(() => {
+  $$('[data-ts]').forEach(el => {
+    const ts = Number((el as HTMLElement).dataset.ts);
+    el.textContent = String(ts).length > 6 ? rel(ts) : '';
+    el.title = abs(ts);
+  });
+}, 30000);
+
+/* ---------------- boot ---------------- */
+
+async function loadInitialBranches(): Promise<void> {
+  await Promise.all(db.workspaces.map(async w => {
+    branches.set(w.id, await window.bentomux.branchFor(w.path));
+  }));
+}
+
+function subscribeRuntime(): void {
+  window.bentomux.onRuntimeStatus(statuses => {
+    for (const [id, st] of Object.entries(statuses)) {
+      runtime[id] = st;
+      if (st.running) activity[id] = Date.now();
+    }
+    renderSidebar();
+  });
+}
+
+function restoreInitialView(restored: import('../shared/types').TabRec[]): void {
+  if (restored.length) activate('term:' + restored[0].id);
+  else render();
+}
+
+function logSmokeIfRequested(): void {
+  if ((window as unknown as { __BENTOMUX_SMOKE?: boolean }).__BENTOMUX_SMOKE) {
+    console.log('[smoke-render] ok workspaces=' + db.workspaces.length + ' tabs=' + ui.tabs.length);
+  }
+}
+
+async function boot(): Promise<void> {
+  setDb(await window.bentomux.getState());
+
+  /* live subscriptions before anything renders */
+  initTerminalEvents();
+  window.bentomux.onBranch((wsId, branch) => {
+    branches.set(wsId, branch);
+    renderSidebar();
+    renderTabs();
+    /* the pill is keyed on the active workspace; if the branch that just
+       changed belongs to the active workspace, re-fetch the diff stat so
+       the +N -N stays in sync without the user opening the panel. */
+    if (wsId === db.activeWorkspaceId) void refreshChangesPill();
+  });
+  subscribeRuntime();
+  initAgentEvents();
+
+  /* restore last session's tabs as fresh shells */
+  const restored = await window.bentomux.restoreTabs();
+  for (const rec of restored) {
+    registerRestoredTab(rec);
+    activity[rec.id] = Date.now();
+  }
+
+  /* initial branch cache */
+  await loadInitialBranches();
+
+  /* initial Changes pill — fetches diff stat for the active workspace so
+     the +N -N in the titlebar is accurate before the user opens the panel */
+  await refreshChangesPill();
+
+  wireAppBar();
+  initKeyboard();
+
+  restoreInitialView(restored);
+  logSmokeIfRequested();
+}
+
+boot().catch(e => {
+  console.error(e);
+  document.body.innerText = 'Bentomux boot error: ' + (e instanceof Error ? e.message : String(e));
+});

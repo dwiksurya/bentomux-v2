@@ -1,0 +1,390 @@
+/* ---------------- sidebar (nav + workspaces + one item per terminal pane) ---------------- */
+
+import { h, $, $$ } from '../dom';
+import { ic, IC } from '../icons';
+import { abs, rel } from '../time';
+import { ui, type Route, type TabEntry } from '../state';
+import { db, branches, runtime, activity, setDb } from '../store';
+import { go } from '../router';
+import { render } from '../render';
+import { activate, leavesOf, newTerminalTab } from './tabs';
+import { mostRecentPane, primePaneFocus } from './terminal';
+import { openModal } from '../components/modal';
+import { closeContextMenu, contextMenuAnchoredTo, openContextMenu, type MenuEntry } from '../components/menu';
+import { openSearchModal } from './search';
+import { openSettingsModal } from './settings';
+import { remoteDockButton } from './remote';
+import { gitPanelPage, refreshChangesPill } from './gitPanel';
+
+const PANE_INDENT = 24;
+
+/* workspace id currently being dragged for sidebar reordering */
+let dragWsId: string | null = null;
+
+interface PaneRow {
+  entry: TabEntry;
+  paneId: string;
+}
+
+interface PaneViewModel {
+  entry: TabEntry;
+  paneId: string;
+  isActive: boolean;
+  branch: string | null;
+  workspaceName: string;
+  status: string;
+  agent: string | null;
+  timestamp: number;
+}
+
+/* every terminal pane living under a workspace — a split tab contributes
+   one row per pane, so the list follows the terminal count, not the tab count */
+function wsPanes(wsId: string): PaneRow[] {
+  const rows: PaneRow[] = [];
+  for (const t of ui.tabs.filter(t => t.route.view === 'terminal' && t.workspaceId === wsId)) {
+    for (const pid of leavesOf(t)) rows.push({ entry: t, paneId: pid });
+  }
+  return rows;
+}
+
+function paneViewModel({ entry, paneId }: PaneRow): PaneViewModel {
+  const st = runtime[paneId];
+  const status = st?.state ?? (st?.running ? 'working' : 'idle');
+  const agent = st?.runtime || null;
+  const ws = db.workspaces.find(w => w.id === entry.workspaceId);
+  const isActive = ui.route.view === 'terminal'
+    && entry.id === ui.activeTab
+    && mostRecentPane(leavesOf(entry)) === paneId;
+  return {
+    entry,
+    paneId,
+    isActive,
+    branch: branches.get(entry.workspaceId || '') || null,
+    workspaceName: ws?.name || 'terminal',
+    status,
+    agent,
+    timestamp: activity[paneId] || Date.now(),
+  };
+}
+
+function isRevealAnimation(ev: Event): boolean {
+  return 'animationName' in ev && (ev as { animationName: string }).animationName === 'workspace-reveal';
+}
+
+function onRevealEnd(btn: HTMLElement): void {
+  btn.addEventListener('animationend', function once(ev: Event) {
+    if (!isRevealAnimation(ev)) return;
+    btn.classList.remove('reveal');
+    btn.removeEventListener('animationend', once);
+  });
+}
+
+function paneItem(row: PaneRow, pad: number, reveal: boolean = false): HTMLElement {
+  const m = paneViewModel(row);
+  const btn = h('button', {
+    class: 'nav-item sub workspace-child' + (m.isActive ? ' active' : '') + (reveal ? ' reveal' : ''),
+    style: 'padding-left:' + pad + 'px',
+    'data-pane': m.paneId,
+    onclick: () => activatePane(m.paneId, m.entry.id),
+  },
+    h('span', { class: 'workspace-row' },
+      h('span', { class: 'branch-icon', html: IC.git }),
+      h('span', { class: 'workspace-copy' },
+        h('span', { class: 'workspace-main' },
+          h('span', { class: 'workspace-name' }, m.branch || m.workspaceName),
+          h('time', { class: 'workspace-time', 'data-ts': String(m.timestamp), title: abs(m.timestamp) }, rel(m.timestamp))),
+        h('span', { class: 'workspace-agent' },
+          h('span', { class: 'agent-status ' + m.status }, m.status),
+          h('span', { class: 'agent-sep' }, '·'),
+          h('span', {}, m.agent || 'shell')))));
+  if (reveal) onRevealEnd(btn);
+  return btn;
+}
+
+function activatePane(paneId: string, entryId: string): void {
+  primePaneFocus(paneId);
+  activate(entryId);
+}
+
+export function addWorkspaceFlow(): void {
+  void window.bentomux.chooseFolder().then(async path => {
+    if (!path) return;
+    setDb(await window.bentomux.addWorkspace(path));
+    const added = findAddedWorkspace(path);
+    if (!added) return;
+    branches.set(added.id, await window.bentomux.branchFor(added.path));
+    db.prefs.expanded = { ...db.prefs.expanded, [added.id]: true };
+    void window.bentomux.setPrefs({ expanded: db.prefs.expanded });
+    renderSidebar();
+  });
+}
+
+function findAddedWorkspace(pickedPath: string) {
+  const norm = (s: string): string => s.replace(/[\\/]+$/, '').toLowerCase();
+  return db.workspaces.find(w => norm(w.path) === norm(pickedPath));
+}
+
+async function performRemoveWorkspace(wsId: string): Promise<void> {
+  setDb(await window.bentomux.removeWorkspace(wsId));
+  /* drop local tab entries; main already killed the ptys */
+  ui.tabs = ui.tabs.filter(t => !(t.route.view === 'terminal' && t.workspaceId === wsId));
+  ui.history = ui.history.filter(id => ui.tabs.some(t => t.id === id));
+  ui.future = [];
+  ensureSomeActiveTab();
+  renderSidebar();
+  render();
+}
+
+function ensureSomeActiveTab(): void {
+  if (ui.tabs.some(t => t.id === ui.activeTab)) return;
+  const next = ui.tabs[0];
+  if (next) { ui.activeTab = next.id; ui.route = next.route; return; }
+  ui.activeTab = null;
+  ui.route = { view: 'agents' };
+}
+
+function confirmRemove(ws: { id: string; name: string; path: string }): void {
+  const count = wsPanes(ws.id).length;
+  const m = openModal({
+    title: 'Remove workspace',
+    body: h('div', {},
+      h('p', { style: 'margin:0 0 6px' }, `Remove “${ws.name}” from Bentomux?`),
+      h('p', { style: 'margin:0;color:var(--ink-2)' },
+        count ? `${count} open terminal${count > 1 ? 's' : ''} will be closed. The folder itself is not deleted.` : 'The folder itself is not deleted.')),
+    footer: h('div', {},
+      h('button', { class: 'btn ghost', onclick: () => m.close() }, 'Cancel'),
+      h('button', {
+        class: 'btn primary',
+        onclick: () => { m.close(); void performRemoveWorkspace(ws.id); },
+      }, 'Remove')),
+  });
+}
+
+/* remember each ws's expanded state from the previous render so we can
+   detect a fresh expand (false → true) and play the reveal animation only then.
+   Initialized lazily on first renderSidebar() because `db` is still undefined
+   when this module is first imported (set later via setDb() from main). */
+let lastExpanded: Record<string, boolean> | null = null;
+
+function navItem(label: string, iconName: keyof typeof IC, view: Route['view']): HTMLElement {
+  /* the Agents row also reads as active while an agent detail page is open,
+     so the section keeps its highlight through the page → detail drill-in */
+  const active = ui.route.view === view
+    || (view === 'agents' && ui.route.view === 'agentDetail');
+  return h('button', {
+    class: 'nav-item' + (active ? ' active' : ''),
+    /* widen to Route so TypeScript doesn't demand the per-view discriminator
+       fields (agentId, tabId) we don't use for the simple nav-row case */
+    onclick: () => go({ view } as Route),
+  }, ic(iconName), h('span', {}, label));
+}
+
+const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform);
+const SEARCH_SHORTCUT = isMac ? '\u2318K' : 'Ctrl K';
+
+function searchTriggerButton(): HTMLElement {
+  return h('button', {
+    class: 'nav-item search-trigger',
+    type: 'button',
+    title: 'Search menus, panes, and tabs (' + (isMac ? '\u2318K' : 'Ctrl+K') + ')',
+    'aria-label': 'Open search',
+    onclick: () => openSearchModal(),
+  },
+    ic('search'),
+    h('span', {}, 'Search'),
+    h('span', { class: 'shortcut' }, SEARCH_SHORTCUT));
+}
+
+function settingsGearButton(): HTMLElement {
+  return h('button', {
+    class: 'iconbtn sidebar-gear',
+    type: 'button',
+    onclick: () => openSettingsModal(),
+    title: 'Open settings',
+    'aria-label': 'Open settings',
+  }, ic('gear'));
+}
+
+export function toggleGitPanel(): void {
+  ui.gitPanelOpen = !ui.gitPanelOpen;
+  document.body.classList.toggle('git-panel-open', ui.gitPanelOpen);
+  renderSidebar();
+}
+
+function workspaceLabelRow(): HTMLElement {
+  return h('div', { class: 'ws-label' },
+    h('span', { class: 'nav-label' }, 'Workspace'),
+    h('button', { class: 'ws-add', title: 'Add workspace folder', 'aria-label': 'Add workspace folder', onclick: () => addWorkspaceFlow() }, '+'));
+}
+
+function toggleWorkspaceExpanded(wsId: string, currentlyOpen: boolean): void {
+  db.prefs.expanded = { ...(db.prefs.expanded || {}), [wsId]: !currentlyOpen };
+  void window.bentomux.setPrefs({ expanded: db.prefs.expanded });
+  db.activeWorkspaceId = wsId;
+  void window.bentomux.setActiveWorkspace(wsId);
+  /* clicking a workspace folder also marks it active; re-fetch the titlebar
+     Changes pill so +N -N matches the newly-active folder */
+  void refreshChangesPill();
+  renderSidebar();
+}
+
+/* ---------------- drag & drop reordering of workspace folders ---------------- */
+
+function startFolderDrag(e: DragEvent, row: HTMLElement, wsId: string): void {
+  dragWsId = wsId;
+  row.classList.add('dragging');
+  if (e.dataTransfer) {
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', wsId);
+  }
+}
+
+function endFolderDrag(row: HTMLElement): void {
+  dragWsId = null;
+  row.classList.remove('dragging');
+  clearDropMarks();
+}
+
+function clearRowDropMark(row: HTMLElement): void {
+  row.classList.remove('drop-above', 'drop-below');
+}
+
+function clearDropMarks(): void {
+  for (const el of $$('.folder.drop-above, .folder.drop-below')) clearRowDropMark(el);
+}
+
+function markDropTarget(row: HTMLElement, below: boolean): void {
+  clearDropMarks();
+  row.classList.add(below ? 'drop-below' : 'drop-above');
+}
+
+function folderDragOver(e: DragEvent, row: HTMLElement, wsId: string): void {
+  if (!dragWsId || dragWsId === wsId) return;
+  e.preventDefault();
+  if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+  const r = row.getBoundingClientRect();
+  markDropTarget(row, e.clientY > r.top + r.height / 2);
+}
+
+function folderDrop(e: DragEvent, row: HTMLElement, targetWsId: string): void {
+  if (!dragWsId || dragWsId === targetWsId) return;
+  e.preventDefault();
+  const r = row.getBoundingClientRect();
+  void commitWorkspaceReorder(targetWsId, e.clientY > r.top + r.height / 2);
+}
+
+/* persist the dragged workspace above/below the drop target */
+async function commitWorkspaceReorder(targetWsId: string, below: boolean): Promise<void> {
+  const dragId = dragWsId;
+  dragWsId = null;
+  if (!dragId) return;
+  const ids = db.workspaces.map(w => w.id);
+  const from = ids.indexOf(dragId);
+  if (from < 0 || !ids.includes(targetWsId)) return;
+  ids.splice(from, 1);
+  const to = ids.indexOf(targetWsId);
+  ids.splice(below ? to + 1 : to, 0, dragId);
+  setDb(await window.bentomux.reorderWorkspaces(ids));
+  renderSidebar();
+}
+
+function workspaceFolder(ws: { id: string; name: string; path: string }, open: boolean): HTMLElement {
+  const row = h('button', {
+    class: 'folder' + (open ? ' open' : ''),
+    title: ws.path,
+    'data-ws': ws.id,
+    onclick: () => toggleWorkspaceExpanded(ws.id, open),
+  },
+    h('span', { class: 'folder-icon', html: IC.folder }),
+    h('span', { class: 'folder-name' }, ws.name),
+    workspaceMenuSpan(ws));
+  row.draggable = true;
+  row.addEventListener('dragstart', e => startFolderDrag(e, row, ws.id));
+  row.addEventListener('dragend', () => endFolderDrag(row));
+  row.addEventListener('dragover', e => folderDragOver(e, row, ws.id));
+  row.addEventListener('dragleave', () => clearRowDropMark(row));
+  row.addEventListener('drop', e => folderDrop(e, row, ws.id));
+  return row;
+}
+
+/* ⋯ toggle that opens the per-workspace action menu (new terminal / remove) */
+function workspaceMenuSpan(ws: { id: string; name: string; path: string }): HTMLElement {
+  const span = h('span', {
+    class: 'ws-menu',
+    title: 'Workspace actions',
+    'aria-label': 'Workspace actions',
+    role: 'button',
+  }, h('span', { class: 'ws-menu-icon', html: IC.dots }));
+  span.addEventListener('click', (e: Event) => {
+    e.stopPropagation(); /* opening the menu must not also expand/collapse the folder */
+    if (contextMenuAnchoredTo(span)) { closeContextMenu(); return; }
+    const r = span.getBoundingClientRect();
+    const entries: MenuEntry[] = [
+      { label: 'New terminal', action: () => void newTerminalTab(ws.id) },
+      { sep: true },
+      { label: 'Remove workspace', action: () => confirmRemove(ws) },
+    ];
+    openContextMenu(r.left, r.bottom + 4, entries, span);
+  });
+  return span;
+}
+
+function renderWorkspaces(): void {
+  const newExpanded: Record<string, boolean> = {};
+  for (const ws of db.workspaces) {
+    const open = db.prefs.expanded?.[ws.id] !== false;
+    /* reveal only on a true user-driven expand (false → true). A ws we haven't
+       seen before is treated as "unknown", not "was-open", so first render and
+       brand-new workspaces never animate (avoids the run-once startup flash). */
+    const prev = lastExpanded![ws.id];
+    const reveal = open && prev === false;
+    newExpanded[ws.id] = open;
+    const nav = $('#nav');
+    nav.append(workspaceFolder(ws, open));
+    if (!open) continue;
+    const kids = wsPanes(ws.id);
+    for (const row of kids) nav.append(paneItem(row, PANE_INDENT, reveal));
+    if (!kids.length) nav.append(h('div', { class: 'empty-note' }, 'No terminals'));
+  }
+  lastExpanded = newExpanded;
+}
+
+export function renderSidebar(): void {
+  if (lastExpanded == null) lastExpanded = { ...(db.prefs?.expanded || {}) };
+  const nav = $('#nav');
+  nav.innerHTML = '';
+
+  nav.append(
+    searchTriggerButton(),
+    navItem('Agents', 'bot', 'agents'),
+    workspaceLabelRow(),
+  );
+
+  renderWorkspaces();
+
+  if (!db.workspaces.length) nav.append(h('div', { class: 'empty-note' }, 'Add a folder to begin'));
+
+  renderBottomDock();
+  renderGitPanel();
+}
+
+/* bottom dock sits below the scrollable nav list and is always visible —
+   the settings gear and the remote toggle live here so they don't get
+   pushed out of reach by long workspace lists. */
+function renderBottomDock(): void {
+  const dock = $('#sidebarBottom');
+  if (!dock) return;
+  dock.innerHTML = '';
+  dock.append(settingsGearButton(), remoteDockButton());
+}
+
+function renderGitPanel(): void {
+  /* mirror body class so the .win grid 4th column animates correctly even
+     when applyShellPrefs() has not run yet (first paint after a render()). */
+  document.body.classList.toggle('git-panel-open', ui.gitPanelOpen);
+  const slot = $('#gitPanelBody');
+  if (!slot) return;
+  if (!ui.gitPanelOpen) return;
+  slot.innerHTML = '';
+  slot.append(gitPanelPage());
+}

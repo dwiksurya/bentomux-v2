@@ -1,0 +1,609 @@
+/* ---------------- agent runtime detection + config views ----------------
+   Phase 6 stub. The shared type contract (AgentInfo, AgentConfigView, etc.)
+   lives here so Phase 4 commands compile; sysinfo process polling and
+   screen-manifest evaluation land in Phase 6. */
+
+use serde::{Deserialize, Serialize};
+
+use crate::state::{AgentInfo, Capabilities};
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum AgentRunState {
+    Idle,
+    Working,
+    Blocked,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeStatus {
+    pub running: bool,
+    pub runtime: Option<String>,
+    /* semantic state; null when no known agent owns the tab */
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<AgentRunState>,
+    /* which rule/manifest produced the state — for debugging */
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub matched_rule: Option<String>,
+    /* how the state was derived */
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+}
+
+/* editable model settings exposed on an agent's Model tab */
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ModelSettingsView {
+    pub model: String,
+    pub base_url: String,
+    pub context: String,
+    pub format: String,
+    /* the stored key is never sent back — presence only */
+    pub has_api_key: bool,
+}
+impl Default for ModelSettingsView {
+    fn default() -> Self {
+        ModelSettingsView { model: String::new(), base_url: String::new(), context: String::new(), format: String::new(), has_api_key: false }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ModelSettingsPatch {
+    pub model: Option<String>,
+    pub base_url: Option<String>,
+    pub context: Option<String>,
+    /* new key value; None = keep current, Some(empty) = clear */
+    pub api_key: Option<Option<String>>,
+    pub format: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ModelField {
+    Model,
+    BaseUrl,
+    Context,
+    ApiKey,
+    Format,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct FormatChoice {
+    pub value: String,
+    pub label: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ResourceCounts {
+    pub memory: u32,
+    pub skills: u32,
+    pub mcp: u32,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct AgentConfigView {
+    pub id: String,
+    pub name: String,
+    pub detected: bool,
+    pub capabilities: Capabilities,
+    pub current_model: Option<String>,
+    pub model_settings: Option<ModelSettingsView>,
+    pub model_fields: Vec<ModelField>,
+    pub model_formats: Vec<FormatChoice>,
+    pub model_suggestions: Vec<String>,
+    pub model_write_target: Option<String>,
+    pub config_path: Option<String>,
+    pub counts: ResourceCounts,
+}
+impl Default for AgentConfigView {
+    fn default() -> Self {
+        AgentConfigView {
+            id: String::new(),
+            name: String::new(),
+            detected: false,
+            capabilities: Capabilities::default(),
+            current_model: None,
+            model_settings: None,
+            model_fields: vec![],
+            model_formats: vec![],
+            model_suggestions: vec![],
+            model_write_target: None,
+            config_path: None,
+            counts: ResourceCounts::default(),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct AgentHooksStatus {
+    pub installed: bool,
+    pub settings_path: String,
+    pub error: Option<String>,
+}
+
+/* ---------------- agent runtime poller ----------------
+   Rust port of src/main/runtime.ts — two-layer detection, herdr-style:
+   1. identity — poll the process table (sysinfo), walk each tab's shell
+      descendant tree, match known agent binaries (claude, pi, codex, …)
+   2. state — evaluate screen-manifest rules against a vt100 headless
+      render of the tab's live output; agents without a manifest fall back
+      to an output-activity pulse (recent data = working).
+
+   Wired from `init()` (called once in setup): it stores the app handle,
+   starts the screen feed, and spawns a 2s poller thread. Status is
+   published on `rt:status` when anything changes, and mirrored into
+   `latest` for surfaces outside the renderer (remote monitor). */
+
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::{Mutex, OnceLock};
+
+use sysinfo::{ProcessesToUpdate, ProcessRefreshKind, System};
+use tauri::{Emitter, Manager};
+
+use crate::detect::{manifests::manifest_for, rules, screen};
+use crate::pty::PtyManager;
+
+struct RuntimeState {
+    app: Option<tauri::AppHandle>,
+    /* subscribers outside the renderer, keyed on the latest status set */
+    update_hooks: Vec<Box<dyn Fn(&BTreeMap<String, RuntimeStatus>) + Send + Sync>>,
+    last_states: HashMap<String, AgentRunState>,
+}
+
+fn runtime_state() -> &'static Mutex<Option<RuntimeState>> {
+    static STATE: OnceLock<Mutex<Option<RuntimeState>>> = OnceLock::new();
+    STATE.get_or_init(|| Mutex::new(None))
+}
+
+const WORKING_PULSE_MS: u64 = 5000;
+
+/* most recent tick's statuses — read by surfaces that don't live in the
+   renderer (remote monitor) */
+static LATEST: OnceLock<Mutex<BTreeMap<String, RuntimeStatus>>> = OnceLock::new();
+fn latest() -> &'static Mutex<BTreeMap<String, RuntimeStatus>> {
+    LATEST.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+pub fn latest_runtime_statuses() -> BTreeMap<String, RuntimeStatus> {
+    latest().lock().unwrap().clone()
+}
+
+pub fn on_runtime_update(cb: impl Fn(&BTreeMap<String, RuntimeStatus>) + Send + Sync + 'static) {
+    let mut guard = runtime_state().lock().unwrap();
+    if let Some(st) = guard.as_mut() {
+        st.update_hooks.push(Box::new(cb));
+    }
+}
+
+/* store the tick + notify the renderer and hook subscribers, but only
+   when something actually changed */
+fn publish(statuses: &BTreeMap<String, RuntimeStatus>) {
+    {
+        let mut lat = latest().lock().unwrap();
+        *lat = statuses.clone();
+    }
+    let mut guard = runtime_state().lock().unwrap();
+    let Some(st) = guard.as_mut() else { return };
+    let hooks = &mut st.update_hooks;
+    for hook in hooks.iter_mut() {
+        hook(statuses);
+    }
+    if let Some(app) = &st.app {
+        let _ = app.emit("rt:status", statuses);
+    }
+}
+
+struct Proc {
+    pid: u32,
+    ppid: u32,
+    name: String,
+    cmd: Option<String>,
+}
+
+struct Match {
+    agent: String,
+    depth: usize,
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+}
+
+/* binary-name matchers, ported verbatim from runtime.ts */
+const NAME_RE: &[(&str, &str)] = &[
+    ("claude", r"^claude(-code)?(-[\w.]+)?(\.exe|\.cmd|\.bat)?$"),
+    ("pi", r"^pi(-agent)?(\.exe|\.cmd|\.bat)?$"),
+    ("codex", r"^codex(-[\w.]+)?(\.exe|\.cmd|\.bat)?$"),
+    ("gemini", r"^gemini(-[\w.]+)?(\.exe|\.cmd|\.bat)?$"),
+    ("opencode", r"^opencode(-[\w.]+)?(\.exe|\.cmd|\.bat)?$"),
+    ("copilot", r"^copilot(-[\w.]+)?(\.exe|\.cmd|\.bat)?$"),
+    ("cursor", r"^cursor-agent(\.exe|\.cmd|\.bat)?$"),
+    ("grok", r"^grok(\.exe|\.cmd|\.bat)?$"),
+];
+
+const MINOR_RE: &str = r"^(qwenpaw|qwen|kimi|kilo|droid|amp)(-code)?(\.exe|\.cmd|\.bat)?$";
+
+fn match_agent(name: &str, cmd: Option<&str>) -> Option<&'static str> {
+    let n = name.to_lowercase();
+    let c = cmd.map(|s| s.to_lowercase()).unwrap_or_default();
+    for (agent, re) in NAME_RE {
+        if let Ok(re) = regex::Regex::new(re) {
+            if re.is_match(&n) {
+                return Some(agent);
+            }
+        }
+    }
+    /* npm-wrapper invocations only visible in the command line */
+    if c.contains("@anthropic-ai/claude-code") || c.contains("@anthropic-ai\\claude-code") {
+        return Some("claude");
+    }
+    /* (^|[\\/"])claude(\.exe)?(["']?\s|$) on the first 240 chars */
+    if let Ok(re) = regex::Regex::new(r#"(^|[\\/"])claude(\.exe)?(["']?\s|$)"#) {
+        let head: String = c.chars().take(240).collect();
+        if re.is_match(&head) {
+            return Some("claude");
+        }
+    }
+    if c.contains("@earendil-works/pi-coding-agent") || c.contains(".pi/agent") || c.contains(".pi\\agent") {
+        return Some("pi");
+    }
+    if c.contains("@openai/codex") || c.contains("@openai\\codex") {
+        return Some("codex");
+    }
+    if c.contains("@google/gemini-cli") || c.contains("@google\\gemini-cli") {
+        return Some("gemini");
+    }
+    /* minor agents via the unified name regex */
+    if let Ok(re) = regex::Regex::new(MINOR_RE) {
+        if let Some(m) = re.captures(&n) {
+            return Some(match m.get(1).unwrap().as_str() {
+                "qwenpaw" => "qwenpaw",
+                "qwen" => "qwen",
+                "kimi" => "kimi",
+                "kilo" => "kilo",
+                "droid" => "droid",
+                "amp" => "amp",
+                _ => unreachable!(),
+            });
+        }
+    }
+    None
+}
+
+fn snapshot() -> Vec<Proc> {
+    let mut sys = System::new();
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::everything(),
+    );
+    sys.processes()
+        .iter()
+        .map(|(pid, p)| Proc {
+            pid: pid.as_u32(),
+            ppid: p.parent().map(|pp| pp.as_u32()).unwrap_or(0),
+            name: p.name().to_string_lossy().to_string(),
+            cmd: p.cmd().first().map(|c| c.to_string_lossy().to_string()),
+        })
+        .collect()
+}
+
+/* Note: Electron's ps-list resolves cmd via /proc on Linux; on macOS the
+   process name is used and cmd rarely surfaces for the agent wrapper. The
+   binary-name matcher covers both platforms. */
+fn deepest_match(start_pid: u32, by_parent: &HashMap<u32, Vec<&Proc>>) -> Option<Match> {
+    let mut best: Option<Match> = None;
+    let mut seen: HashSet<u32> = HashSet::new();
+    seen.insert(start_pid);
+    let mut frontier = vec![start_pid];
+    let mut depth = 0usize;
+    while !frontier.is_empty() && depth < 16 {
+        depth += 1;
+        let mut next: Vec<u32> = Vec::new();
+        for pid in frontier {
+            for child in by_parent.get(&pid).into_iter().flatten() {
+                if seen.contains(&child.pid) {
+                    continue;
+                }
+                seen.insert(child.pid);
+                next.push(child.pid);
+                if let Some(m) = match_agent(&child.name, child.cmd.as_deref()) {
+                    if best.is_none() || depth < best.as_ref().unwrap().depth {
+                        best = Some(Match { agent: m.to_string(), depth });
+                    }
+                }
+            }
+        }
+        frontier = next;
+    }
+    best
+}
+
+fn status_for(tab_id: &str, match_: Option<Match>) -> RuntimeStatus {
+    let Some(m) = match_ else {
+        return RuntimeStatus { running: false, runtime: None, state: None, matched_rule: None, source: None };
+    };
+    let mut base = RuntimeStatus {
+        running: true,
+        runtime: Some(m.agent.clone()),
+        state: None,
+        matched_rule: None,
+        source: None,
+    };
+    let (osc_title, osc_progress, last_data_at) = screen::screen_meta(tab_id);
+    let lines = screen::screen_lines(tab_id);
+    let manifest = manifest_for(&m.agent);
+
+    let (Some(manifest), false) = (manifest.as_ref(), lines.is_empty()) else {
+        /* no screen authority: activity pulse decides */
+        let state = if now_ms().saturating_sub(last_data_at) < WORKING_PULSE_MS {
+            AgentRunState::Working
+        } else {
+            AgentRunState::Idle
+        };
+        base.state = Some(state);
+        base.source = Some("activity".to_string());
+        return base;
+    };
+
+    let det = rules::evaluate(manifest, &rules::ScreenInput {
+        osc_title,
+        osc_progress,
+        lines,
+    });
+
+    if det.skip_state_update {
+        /* transient overlay (transcript view, pickers): hold the previous state */
+        let prev = runtime_state().lock().unwrap().as_ref()
+            .and_then(|st| st.last_states.get(tab_id))
+            .cloned()
+            .unwrap_or(AgentRunState::Working);
+        base.state = Some(prev);
+        base.matched_rule = det.rule_id;
+        base.source = Some("manifest".to_string());
+        return base;
+    }
+    match det.state {
+        None | Some(rules::RunState::Unknown) => {
+            /* default_known_agent_idle_fallback */
+            base.state = Some(AgentRunState::Idle);
+            base.source = Some("manifest".to_string());
+        }
+        Some(rules::RunState::Idle) => base.state = Some(AgentRunState::Idle),
+        Some(rules::RunState::Working) => base.state = Some(AgentRunState::Working),
+        Some(rules::RunState::Blocked) => base.state = Some(AgentRunState::Blocked),
+    }
+    if matches!(det.state, Some(_)) && det.state != Some(rules::RunState::Unknown) {
+        base.matched_rule = det.rule_id;
+    }
+    base.source = Some("manifest".to_string());
+    base
+}
+
+pub fn init(app: tauri::AppHandle) {
+    {
+        let mut guard = runtime_state().lock().unwrap();
+        *guard = Some(RuntimeState {
+            app: Some(app.clone()),
+            update_hooks: Vec::new(),
+            last_states: HashMap::new(),
+        });
+    }
+
+    /* feed the headless screen model from raw pty output */
+    let data_rx = app.state::<PtyManager>().on_term_data();
+    let exit_rx = app.state::<PtyManager>().on_term_exit();
+    screen::init_screen_feed(data_rx, exit_rx);
+
+    /* per-tab runtime poller */
+    std::thread::spawn(move || {
+        let mut last_json = String::new();
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(2000));
+            let terms = app.state::<PtyManager>().live_terms();
+            if terms.is_empty() {
+                publish(&BTreeMap::new());
+                continue;
+            }
+            let procs = snapshot();
+            let mut by_parent: HashMap<u32, Vec<&Proc>> = HashMap::new();
+            for p in &procs {
+                by_parent.entry(p.ppid).or_default().push(p);
+            }
+            let mut statuses: BTreeMap<String, RuntimeStatus> = BTreeMap::new();
+            for t in &terms {
+                let st = status_for(&t.id, deepest_match(t.pid, &by_parent));
+                if st.state.is_some() {
+                    runtime_state().lock().unwrap().as_mut()
+                        .map(|s| s.last_states.insert(t.id.clone(), st.state.clone().unwrap()));
+                }
+                statuses.insert(t.id.clone(), st);
+            }
+            /* match the Electron change-detection: only publish a new frame
+               when the serialized payload differs */
+            let json = serde_json::to_string(&statuses).unwrap_or_default();
+            if json != last_json {
+                last_json = json;
+                publish(&statuses);
+            }
+        }
+    });
+}
+
+pub fn agent_config_view(workspaces: &[crate::state::WorkspaceRec], agent_id: &str) -> Option<AgentConfigView> {
+    crate::agents::index::agent_config_view(workspaces, agent_id)
+}
+
+pub fn set_agent_model_settings(
+    workspaces: &[crate::state::WorkspaceRec],
+    agent_id: &str,
+    patch: ModelSettingsPatch,
+) -> Result<AgentConfigView, String> {
+    crate::agents::index::set_agent_model_settings(workspaces, agent_id, patch)
+}
+
+pub fn agent_hooks_status() -> AgentHooksStatus {
+    crate::agent_hooks::read_hook_status(&crate::agent_hooks::default_settings_path())
+}
+
+pub fn agent_hooks_install(script_path: &str) -> AgentHooksStatus {
+    crate::agent_hooks::install_hooks(&crate::agent_hooks::default_settings_path(), script_path)
+}
+
+pub fn agent_hooks_uninstall() -> AgentHooksStatus {
+    crate::agent_hooks::uninstall_hooks(&crate::agent_hooks::default_settings_path())
+}
+
+/* live detection + model settings come from the agent adapters */
+pub fn agents_info(workspaces: &[crate::state::WorkspaceRec]) -> Vec<AgentInfo> {
+    crate::agents::index::agents_info(workspaces)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn proc(pid: u32, ppid: u32, name: &str, cmd: Option<&str>) -> Proc {
+        Proc {
+            pid,
+            ppid,
+            name: name.to_string(),
+            cmd: cmd.map(|s| s.to_string()),
+        }
+    }
+
+    /* ---------- binary-name matching ---------- */
+
+    #[test]
+    fn match_agent_known_binary_names() {
+        for (name, expect) in [
+            ("claude", "claude"),
+            ("claude-code", "claude"),
+            ("claude-code-1.0.5", "claude"),
+            ("claude.exe", "claude"),
+            ("pi", "pi"),
+            ("pi-agent", "pi"),
+            ("codex", "codex"),
+            ("codex-1.2.3", "codex"),
+            ("gemini", "gemini"),
+            ("opencode", "opencode"),
+            ("copilot", "copilot"),
+            ("cursor-agent", "cursor"),
+            ("grok", "grok"),
+        ] {
+            assert_eq!(match_agent(name, None), Some(expect), "name {name}");
+        }
+    }
+
+    #[test]
+    fn match_agent_minor_agents() {
+        assert_eq!(match_agent("qwen", None), Some("qwen"));
+        assert_eq!(match_agent("qwen-code", None), Some("qwen"));
+        assert_eq!(match_agent("qwenpaw", None), Some("qwenpaw"));
+        assert_eq!(match_agent("qwenpaw-code", None), Some("qwenpaw"));
+        assert_eq!(match_agent("kimi", None), Some("kimi"));
+        assert_eq!(match_agent("droid", None), Some("droid"));
+        assert_eq!(match_agent("amp", None), Some("amp"));
+    }
+
+    #[test]
+    fn match_agent_ignores_plain_shells() {
+        assert_eq!(match_agent("bash", None), None);
+        assert_eq!(match_agent("zsh", None), None);
+        assert_eq!(match_agent("node", None), None);
+        assert_eq!(match_agent("git", None), None);
+    }
+
+    #[test]
+    fn match_agent_resolves_npm_wrappers_via_cmd() {
+        /* trailing /claude token (preceded by slash, end-of-line) matches the
+           token rule; an inline `claude-code` in the middle of the tail does not */
+        assert_eq!(match_agent("node", Some("/usr/local/bin/claude")), Some("claude"));
+        assert_eq!(match_agent("node", Some("node /usr/local/bin/claude --mcp")), Some("claude"));
+        assert_eq!(match_agent("npm", Some("npm exec @anthropic-ai/claude-code")), Some("claude"));
+        assert_eq!(match_agent("node", Some(".\\node_modules\\@openai\\codex")), Some("codex"));
+        assert_eq!(match_agent("node", Some("@google/gemini-cli foo")), Some("gemini"));
+        assert_eq!(match_agent("node", Some(".pi/agent run")), Some("pi"));
+        /* an embedded `claude-code` shared-name token is NOT a wrapper match */
+        assert_eq!(match_agent("node", Some("node /usr/local/bin/claude-code")), None);
+    }
+
+    #[test]
+    fn match_agent_unknown_returns_none() {
+        assert_eq!(match_agent("deno", Some("deno run server.ts")), None);
+        assert_eq!(match_agent("tmux", None), None);
+    }
+
+    /* ---------- process-tree walking ---------- */
+
+    fn parent_map(procs: &[Proc]) -> HashMap<u32, Vec<&Proc>> {
+        let mut by_parent: HashMap<u32, Vec<&Proc>> = HashMap::new();
+        for p in procs {
+            by_parent.entry(p.ppid).or_default().push(p);
+        }
+        by_parent
+    }
+
+    #[test]
+    fn deepest_match_finds_agent_descendant_at_shallowest_depth() {
+        /* shell → node → claude-code. The node wrapper itself matches via the
+           trailing /claude token, so the shallowest agent (depth 1) wins. */
+        let procs = vec![
+            proc(1, 0, "zsh", None),
+            proc(2, 1, "node", Some("node /usr/local/bin/claude")),
+            proc(3, 2, "claude-code", None),
+        ];
+        let m = deepest_match(1, &parent_map(&procs)).unwrap();
+        assert_eq!(m.agent, "claude");
+        assert_eq!(m.depth, 1);
+    }
+
+    #[test]
+    fn deepest_match_prefers_shallowest_agent() {
+        /* two agents; the shallowest (depth 1) must win over depth 3 */
+        let procs = vec![
+            proc(1, 0, "zsh", None),
+            proc(2, 1, "codex", None),
+            proc(3, 1, "node", Some("node gemini")),
+            proc(4, 3, "gemini", None),
+        ];
+        let m = deepest_match(1, &parent_map(&procs)).unwrap();
+        assert_eq!(m.agent, "codex");
+        assert_eq!(m.depth, 1);
+    }
+
+    #[test]
+    fn deepest_match_none_when_no_agent_in_tree() {
+        let procs = vec![
+            proc(1, 0, "bash", None),
+            proc(2, 1, "git", None),
+            proc(3, 1, "ls", None),
+        ];
+        assert!(deepest_match(1, &parent_map(&procs)).is_none());
+    }
+
+    #[test]
+    fn deepest_match_respects_start_identity_miss() {
+        /* the start process itself matches nothing even if it is a real agent;
+           we only look at descendants, mirroring the TS behavior */
+        let procs = vec![proc(1, 0, "claude", None)];
+        assert!(deepest_match(1, &parent_map(&procs)).is_none());
+    }
+
+    #[test]
+    fn deepest_match_does_not_loop_on_cycles() {
+        let procs = vec![
+            proc(1, 0, "bash", None),
+            proc(2, 1, "bash", None),
+            proc(1, 2, "bash", None), /* cycle back to the root */
+        ];
+        /* must terminate (depth cap) without hanging */
+        assert!(deepest_match(1, &parent_map(&procs)).is_none());
+    }
+}

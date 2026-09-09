@@ -1,0 +1,450 @@
+/* ---------------- tabs (titlebar tabstrip; terminals + resource pages) ---------------- */
+
+import { $, h } from '../dom';
+import type { TabRec } from '../../shared/types';
+import { leafNode, leafIds, firstLeafId, splitLeaf, removeLeaf, setSplitDir, newNodeKey, treeHasKey, type PaneNode } from '../../shared/split-tree';
+import { ui, type Route, type TabEntry } from '../state';
+import { db, branches, activity } from '../store';
+import { render } from '../render';
+import { disposeTerminal } from './terminal';
+import { resetPaneRatio } from './terminal';
+import { openContextMenu } from '../components/menu';
+import { refreshChangesPill } from './gitPanel';
+
+const TAB_TITLE_MAX = 80;
+
+export function tabFor(id: string | null): TabEntry | undefined {
+  return ui.tabs.find(t => t.id === id);
+}
+
+export function tabKey(route: Route): string {
+  if (route.view === 'terminal') return 'term:' + route.tabId;
+  if (route.view === 'agentDetail') return 'agent:' + route.agentId + ':' + route.tab;
+  if (route.view === 'diff') return 'diff:' + route.workspaceId + ':' + route.path;
+  return route.view;
+}
+
+/* all pane ids of a terminal tab (single-pane tabs: just the anchor id) */
+export function leavesOf(t: TabEntry): string[] {
+  if (t.route.view !== 'terminal') return [];
+  return t.tree ? leafIds(t.tree) : [t.route.tabId];
+}
+
+function entryForPane(paneId: string): TabEntry | undefined {
+  return ui.tabs.find(t => t.route.view === 'terminal' && leavesOf(t).includes(paneId));
+}
+
+/* tab key ('term:<anchor>') owning this pane — for menus outside tabs.ts */
+export function tabKeyForPane(paneId: string): string | null {
+  return entryForPane(paneId)?.id ?? null;
+}
+
+export function tabTitle(t: TabEntry): string {
+  const route = t.route;
+  if (route.view === 'terminal') {
+    if (t.title) return t.title;
+    const ws = db.workspaces.find(w => w.id === t.workspaceId);
+    return branches.get(t.workspaceId || '') || ws?.name || 'Terminal';
+  }
+  if (route.view === 'agentDetail') {
+    const cap = route.tab === 'model' ? 'Model' : route.tab === 'memory' ? 'Memory' : route.tab === 'skills' ? 'Skills' : 'MCP';
+    const name = db.agents?.find(a => a.id === route.agentId)?.name || route.agentId;
+    return name + ' · ' + cap;
+  }
+  if (route.view === 'diff') return diffTabTitle(route.path);
+  return 'Agents';
+}
+
+/* one file per tab — show just the basename; the full path lives in the
+   tab's tooltip */
+function diffTabTitle(path: string): string {
+  const base = path.split('/').pop() || path;
+  return base || 'Diff';
+}
+
+function syncActiveWorkspaceMarker(workspaceId: string | undefined): void {
+  if (!workspaceId) return;
+  if (db.activeWorkspaceId === workspaceId) return;
+  db.activeWorkspaceId = workspaceId;
+  void window.bentomux.setActiveWorkspace(workspaceId);
+  /* the titlebar Changes pill is keyed on the active workspace — re-fetch
+     so +N -N reflects the newly-active folder without the user opening
+     the Git panel */
+  void refreshChangesPill();
+}
+
+function pushHistory(from: string, to: string): void {
+  if (from === to) return;
+  if (ui.history[ui.history.length - 1] === from) return;
+  /* non-terminal routes don't have a tab in ui.tabs; skip them so history
+     only tracks terminal-tab navigation and stays resolvable on back-step */
+  if (from && !ui.tabs.some(t => t.id === from)) return;
+  ui.history.push(from);
+  if (ui.history.length > 60) ui.history.shift();
+  ui.future = [];
+}
+
+export function setRoute(route: Route): void {
+  /* the titlebar tab strip holds terminals and diff pages; other resource
+     pages (agents, agentDetail) live as standalone pages and never become
+     a tab — we just update ui.route and re-render. */
+  if (route.view !== 'terminal' && route.view !== 'diff') {
+    if (ui.activeTab) pushHistory(ui.activeTab, '');
+    ui.route = route;
+    window.bentomux.setActiveTab(null);
+    render();
+    return;
+  }
+  const key = tabKey(route);
+  let t = ui.tabs.find(x => x.id === key);
+  if (!t) {
+    const workspaceId = route.view === 'diff' ? route.workspaceId : findWorkspaceForTab(route.tabId);
+    t = { id: key, route, workspaceId };
+    ui.tabs.push(t);
+  }
+  if (route.view === 'terminal') {
+    t.workspaceId = t.workspaceId || findWorkspaceForTab(route.tabId);
+    if (!activity[route.tabId]) activity[route.tabId] = Date.now();
+  }
+  activate(key);
+}
+
+function findWorkspaceForTab(tabId: string): string | undefined {
+  return lastCreatedWs.get(tabId);
+}
+
+/* workspace binding for freshly created tabs, filled at creation time */
+export const lastCreatedWs = new Map<string, string>();
+
+/* create local tab entries for tabs restored by main at launch */
+export function registerRestoredTab(rec: TabRec): void {
+  if (ui.tabs.some(t => t.route.view === 'terminal' && t.route.tabId === rec.id)) return;
+  ui.tabs.push({ id: 'term:' + rec.id, route: { view: 'terminal', tabId: rec.id }, workspaceId: rec.workspaceId, tree: rec.splitTree, title: rec.title });
+}
+
+export function activate(id: string): void {
+  if (ui.activeTab) pushHistory(ui.activeTab, id);
+  const t = tabFor(id) || ui.tabs[0];
+  if (!t) return;
+  ui.activeTab = t.id;
+  ui.route = t.route;
+  /* the sidebar's active-workspace marker follows the tab being viewed;
+     non-terminal tabs keep the last workspace marked */
+  syncActiveWorkspaceMarker(t.workspaceId);
+  /* main tracks which pane's tab is on screen so the approval overlay
+     stays hidden while the user is already looking at it */
+  window.bentomux.setActiveTab(t.route.view === 'terminal' ? t.route.tabId : null);
+  /* switching to a terminal tab dismisses the Git Tools right-panel so the
+     full content area is available for the shell; the panel can be
+     re-opened from its titlebar pill regardless of route */
+  if (t.route.view === 'terminal') { ui.gitPanelOpen = false; }
+  render();
+}
+
+function pickNextTab(removedIndex: number): TabEntry | null {
+  const fromHistory = ui.history.pop();
+  if (fromHistory) {
+    const t = tabFor(fromHistory);
+    if (t) return t;
+  }
+  return ui.tabs[Math.max(0, removedIndex - 1)] || ui.tabs[0] || null;
+}
+
+function dropIdsFrom(...lists: string[][]): string[][] {
+  return lists.map(list => list.filter(x => !ui.tabs.some(t => t.id === x)));
+}
+
+export async function closeTab(id: string): Promise<void> {
+  const i = ui.tabs.findIndex(t => t.id === id);
+  if (i < 0) return;
+  const t = ui.tabs[i];
+  await shutdownTab(t);
+  ui.tabs.splice(i, 1);
+  [ui.history, ui.future] = dropIdsFrom(ui.history, ui.future);
+
+  const next = pickNextTab(i);
+  if (next) activate(next.id);
+  else goMemory();
+}
+
+/* kill the ptys of every pane and drop per-tab renderer state; caller updates ui.tabs */
+async function shutdownTab(t: TabEntry): Promise<void> {
+  const leaves = leavesOf(t);
+  if (!leaves.length) return;
+  await window.bentomux.closeTab(leaves[0]); /* main removes the whole record */
+  for (const id of leaves) {
+    disposeTerminal(id);
+    delete activity[id];
+    lastCreatedWs.delete(id);
+  }
+}
+
+export async function closeOtherTabs(keepId: string): Promise<void> {
+  const victims = ui.tabs.filter(t => t.id !== keepId);
+  for (const t of victims) await shutdownTab(t);
+  const dead = new Set(victims.map(t => t.id));
+  ui.tabs = ui.tabs.filter(t => !dead.has(t.id));
+  ui.history = ui.history.filter(x => !dead.has(x));
+  ui.future = ui.future.filter(x => !dead.has(x));
+  activate(keepId);
+}
+
+export async function closeAllTabs(): Promise<void> {
+  for (const t of [...ui.tabs]) await shutdownTab(t);
+  ui.tabs = [];
+  ui.history = [];
+  ui.future = [];
+  ui.activeTab = null;
+  goMemory();
+}
+
+function tabContextMenu(x: number, y: number, id: string): void {
+  const t = tabFor(id);
+  openContextMenu(x, y, [
+    { label: 'Rename tab…', disabled: !t || t.route.view !== 'terminal', action: () => beginRename(id) },
+    { label: 'Close tab', action: () => void closeTab(id) },
+    { label: 'Close other tabs', disabled: ui.tabs.length < 2, action: () => void closeOtherTabs(id) },
+    { label: 'Close all tabs', action: () => void closeAllTabs() },
+  ]);
+}
+
+function findTabButton(id: string): HTMLElement | null {
+  return $('.tab[data-tab="' + CSS.escape(id) + '"]', $('#tabstrip'));
+}
+
+function findTabLabel(btn: HTMLElement): HTMLElement | null {
+  return $('.tabname', btn);
+}
+
+function commitTitleOnBlur(input: HTMLInputElement, t: TabEntry, done: { v: boolean }): void {
+  if (done.v) return;
+  done.v = true;
+  commitTitle(t, input.value);
+}
+
+/* inline rename: swap the label for an input inside the tab button;
+   Enter/blur commits, Escape restores, empty clears back to the default title */
+export function beginRename(id: string): void {
+  const t = tabFor(id);
+  if (!t || t.route.view !== 'terminal') return;
+  const btn = findTabButton(id);
+  if (!btn) return;
+  const existing = $('.tabname-edit', btn);
+  if (existing) { existing.focus(); return; }
+  const label = findTabLabel(btn);
+  if (!label) return;
+  const input = makeRenameInput(t);
+  const done = { v: false };
+  input.addEventListener('blur', () => commitTitleOnBlur(input, t, done));
+  label.replaceWith(input);
+  input.focus();
+  input.select();
+}
+
+function makeRenameInput(t: TabEntry): HTMLInputElement {
+  const input = h('input', {
+    class: 'tabname-edit',
+    value: t.title || '',
+    spellcheck: 'false',
+    onmousedown: (e: Event) => e.stopPropagation(),
+    onclick: (e: Event) => e.stopPropagation(),
+    ondblclick: (e: Event) => e.stopPropagation(),
+    onkeydown: (e: KeyboardEvent) => {
+      e.stopPropagation();
+      if (e.key === 'Enter') input.blur();
+      else if (e.key === 'Escape') {
+        input.value = t.title || '';
+        input.blur();
+        render();
+      }
+    },
+  }) as HTMLInputElement;
+  return input;
+}
+
+function commitTitle(t: TabEntry, value: string): void {
+  if (t.route.view !== 'terminal') return;
+  const name = value.trim().slice(0, TAB_TITLE_MAX);
+  t.title = name || undefined;
+  /* any pane id works — main resolves the owning record */
+  window.bentomux.renameTab(t.route.tabId, name);
+  render();
+}
+
+function goMemory(): void {
+  ui.activeTab = null;
+  ui.route = { view: 'agents' };
+  /* render directly — setRoute skips tab creation for non-terminal routes */
+  render();
+}
+
+export async function newTerminalTab(wsId?: string): Promise<void> {
+  const ws = db.workspaces.find(w => w.id === (wsId || db.activeWorkspaceId));
+  if (!ws) return;
+  try {
+    const rec = await window.bentomux.createTab(ws.id);
+    lastCreatedWs.set(rec.id, ws.id);
+    activity[rec.id] = Date.now();
+    setRoute({ view: 'terminal', tabId: rec.id });
+    if (rec.title) {
+      /* main pre-assigns the workspace's remembered title */
+      const entry = tabFor('term:' + rec.id);
+      if (entry) { entry.title = rec.title; render(); }
+    }
+  } catch (e) {
+    console.error('create tab failed', e);
+  }
+}
+
+/* split the pane `paneId`: new shell to its right ('v') or below it ('h').
+   The key is generated here so main and renderer grow identical trees. */
+export async function splitTerminalPane(paneId: string, dir: 'v' | 'h' = 'v'): Promise<void> {
+  const entry = entryForPane(paneId);
+  if (!entry || entry.route.view !== 'terminal') return;
+  const key = newNodeKey();
+  try {
+    const rec = await window.bentomux.splitTab(paneId, dir, key);
+    const base = entry.tree ?? leafNode(entry.route.tabId);
+    entry.tree = splitLeaf(base, paneId, dir, rec.id, key);
+    activity[rec.id] = Date.now();
+    if (entry.workspaceId) lastCreatedWs.set(rec.id, entry.workspaceId);
+    render();
+  } catch (e) {
+    console.error('split pane failed', e);
+  }
+}
+
+/* flip one axis between side-by-side and stacked (addressed by node key);
+   the divider returns to an even 50/50 split */
+export function setNodeDir(nodeKey: string, dir: 'v' | 'h'): void {
+  const entry = ui.tabs.find(t => t.route.view === 'terminal' && t.tree && treeHasKey(t.tree, nodeKey));
+  if (!entry || !entry.tree) return;
+  entry.tree = setSplitDir(entry.tree, nodeKey, dir);
+  resetPaneRatio(nodeKey);
+  window.bentomux.setSplitDir(nodeKey, dir);
+  render();
+}
+
+/* close one pane; its axis collapses, anchor re-keys when it was the first pane */
+export async function closeTerminalPane(paneId: string): Promise<void> {
+  const entry = entryForPane(paneId);
+  if (!entry || entry.route.view !== 'terminal') return;
+  const before = entry.tree ?? leafNode(entry.route.tabId);
+  disposeTerminal(paneId);
+  delete activity[paneId];
+  lastCreatedWs.delete(paneId);
+  await window.bentomux.closePane(paneId);
+  const tree = removeLeaf(before, paneId);
+  if (!tree) {
+    await closeTab(entry.id);
+    return;
+  }
+  reanchorEntryOnPaneClose(entry, tree);
+  render();
+}
+
+function reanchorEntryOnPaneClose(entry: TabEntry, tree: PaneNode): void {
+  if (entry.route.view !== 'terminal') return;
+  const newAnchor = firstLeafId(tree);
+  if (entry.route.tabId !== newAnchor) rekeyTabToAnchor(entry, newAnchor);
+  entry.tree = tree.kind === 'split' ? tree : undefined;
+}
+
+function rekeyTabToAnchor(entry: TabEntry, newAnchor: string): void {
+  /* keep tab key + route anchored on the surviving first pane, like main re-keyed */
+  const oldKey = entry.id;
+  entry.route = { view: 'terminal', tabId: newAnchor };
+  entry.id = 'term:' + newAnchor;
+  ui.history = ui.history.map(k => (k === oldKey ? entry.id : k));
+  ui.future = ui.future.map(k => (k === oldKey ? entry.id : k));
+  if (ui.activeTab === oldKey) { ui.activeTab = entry.id; ui.route = entry.route; }
+}
+
+export function stepHistory(dir: -1 | 1): void {
+  if (dir === -1) {
+    const prev = ui.history.pop();
+    if (!prev) return;
+    if (ui.activeTab) ui.future.push(ui.activeTab);
+    jumpToHistoryEntry(prev);
+  } else {
+    const next = ui.future.pop();
+    if (!next) return;
+    if (ui.activeTab) ui.history.push(ui.activeTab);
+    jumpToHistoryEntry(next);
+  }
+}
+
+function jumpToHistoryEntry(id: string): void {
+  const t = tabFor(id);
+  if (!t) return;
+  ui.activeTab = id;
+  ui.route = t.route;
+  render();
+}
+
+let wheelWired = false;
+
+function tabButton(t: TabEntry): HTMLElement {
+  const title = tabTitle(t);
+  /* diff tabs carry the repo-relative file path in their route — surface it
+     in the tooltip so same-named files from different folders are told apart */
+  const tooltip = t.route.view === 'diff' ? t.route.path : (t.title ? title + '\nDouble-click to rename' : title);
+  return h('button',
+    {
+      class: 'tab' + (t.id === ui.activeTab ? ' active' : ''),
+      title: tooltip,
+      dataset: { tab: t.id },
+      /* no-op on an already-active tab: render() rebuilds the strip,
+         which would eat the second click's dblclick for rename */
+      onclick: () => { if (ui.activeTab !== t.id) activate(t.id); },
+      ondblclick: () => beginRename(t.id),
+      oncontextmenu: (e: MouseEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+        tabContextMenu(e.clientX, e.clientY, t.id);
+      },
+    },
+    h('span', { class: 'tabname' }, title),
+    h('span', { class: 'tabx', onclick: (e: Event) => { e.stopPropagation(); void closeTab(t.id); } }, '×'),
+  );
+}
+
+function addTabButton(): HTMLElement {
+  return h('button', {
+    class: 'tabadd',
+    title: db.activeWorkspaceId ? 'New terminal in active workspace' : 'Add a workspace folder first',
+    disabled: !db.activeWorkspaceId,
+    onclick: () => void newTerminalTab(),
+  }, '+');
+}
+
+function wireWheelOnce(strip: HTMLElement): void {
+  if (wheelWired) return;
+  wheelWired = true;
+  strip.addEventListener('wheel', (e: WheelEvent) => {
+    if (strip.scrollWidth > strip.clientWidth) {
+      strip.scrollLeft += e.deltaY;
+      e.preventDefault();
+    }
+  }, { passive: false });
+}
+
+function scrollActiveTabIntoView(strip: HTMLElement): void {
+  const act = $('.tab.active', strip);
+  if (act) act.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+}
+
+export function renderTabs(): void {
+  const strip = $('#tabstrip');
+  strip.classList.add('tabstrip');
+  $('#titlebar').classList.add('has-tabs');
+  strip.innerHTML = '';
+  /* the strip holds terminal tabs plus per-file diff tabs; the '+' button
+     only makes sense for terminals */
+  for (const t of ui.tabs.filter(t => t.route.view === 'terminal' || t.route.view === 'diff')) strip.append(tabButton(t));
+  if (ui.tabs.some(t => t.route.view === 'terminal')) strip.append(addTabButton());
+
+  /* overflow strip scrolls horizontally instead of clipping tabs */
+  wireWheelOnce(strip);
+  scrollActiveTabIntoView(strip);
+}

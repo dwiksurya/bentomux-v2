@@ -1,0 +1,54 @@
+[package]
+name = "bentomux"
+version = "0.1.0"
+edition = "2021"
+description = "Bentomux — calm desktop for AI agent runtime workspaces"
+
+[lib]
+name = "bentomux_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2.1", features = [] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1", features = ["full"] }
+portable-pty = "0.8"
+sysinfo = "0.32"
+notify = "7.0"
+axum = { version = "0.7", features = ["ws"] }
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
+qrcode = { version = "0.14", features = ["svg"] }
+local-ip-address = "0.6"
+base64 = "0.22"
+rand = "0.8"
+chrono = "0.4"
+dirs = "5.0"
+# native folder picker for workspace_choose (no Tauri plugin/capability needed;
+# rfd opens its own OS dialog out-of-process)
+rfd = "0.15"
+
+# Screen buffer parsing (pure-Rust option for agent state detection)
+vt100 = "0.15"
+
+# YAML/TOML parsing for agent configs
+serde_yaml = "0.9"
+toml = "0.8"
+# manifest rule matching (screen/line regexes)
+regex = "1"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = ["Win32_System_Pipes", "Win32_Storage_FileSystem"] }
+
+[target.'cfg(unix)'.dependencies]
+# Unix socket support included in tokio
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

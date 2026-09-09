@@ -1,0 +1,345 @@
+/* ---------------- settings modal (left menu + section content) ----------------
+   Opens as a modal with an internal menu; sections plug into SECTIONS below.
+   Ships Appearance, Terminal (shell), Keybindings, and Notifications. */
+
+import { h } from '../dom';
+import { currentModal, field, openModal } from '../components/modal';
+import { selectEl } from '../components/select';
+import { toggleSeg } from '../components/toggle';
+import { ic, IC } from '../icons';
+import { db } from '../store';
+import { setThemeMode, setPalette, setTerminalFont, setTerminalFontSize } from '../main';
+import { accelFor, formatAccel, type ActionId } from '../keyboard';
+import { PALETTES, type PaletteName, type AgentHooksStatus, type Prefs } from '../../shared/types';
+
+/* persist one pref key and run any immediate side effect; callers repaint
+   the modal content afterwards */
+function setPref<K extends keyof Prefs>(key: K, value: Prefs[K], apply?: () => void): void {
+  db.prefs[key] = value;
+  const patch: Prefs = {};
+  patch[key] = value;
+  void window.bentomux.setPrefs(patch);
+  apply?.();
+}
+
+/* muted explanation line under a field */
+function hint(text: string): HTMLElement {
+  return h('div', { class: 'settings-hint' }, text);
+}
+
+const PALETTE_LABELS: Record<PaletteName, string> = {
+  default: 'Default',
+  catppuccin: 'Catppuccin',
+  'rose-pine': 'Rosé Pine',
+  gruvbox: 'Gruvbox',
+  dracula: 'Dracula',
+  nord: 'Nord',
+  classic: 'Classic',
+  eink: 'E-Ink',
+};
+
+/* three dots echo the palette's surface / accent / ink so users can
+   recognize the theme at a glance without reading the label */
+const PALETTE_SWATCH: Record<PaletteName, [string, string, string]> = {
+  default: ['#F9FAFB', '#2563EB', '#1F2328'],
+  catppuccin: ['#eff1f5', '#1e66f5', '#4c4f69'],
+  'rose-pine': ['#faf4ed', '#286983', '#575279'],
+  gruvbox: ['#fbf1c7', '#458588', '#3c3836'],
+  dracula: ['#f8f8f2', '#bd93f9', '#282a36'],
+  nord: ['#eceff4', '#5e81ac', '#2e3440'],
+  classic: ['#fff6e5', '#ffcd75', '#3b2a1f'],
+  eink: ['#ffffff', '#000000', '#000000'],
+};
+
+function syncSeg(seg: HTMLElement, onIndex: 0 | 1): void {
+  const [first, second] = seg.children as HTMLCollectionOf<HTMLElement>;
+  first.classList.toggle('on', onIndex === 0);
+  second.classList.toggle('on', onIndex === 1);
+}
+
+/* ---------------- Appearance ---------------- */
+
+function buildModeSeg(paint: () => void): HTMLElement {
+  const seg = h('div', { class: 'seg' },
+    h('button', { onclick: () => { setThemeMode('light'); paint(); } }, 'Light'),
+    h('button', { onclick: () => { setThemeMode('dark'); paint(); } }, 'Dark'));
+  syncSeg(seg, db.prefs.theme === 'dark' ? 1 : 0);
+  return seg;
+}
+
+function buildPaletteGrid(paint: () => void): HTMLElement {
+  const current: PaletteName = (db.prefs.palette as PaletteName) || 'default';
+  const grid = h('div', { class: 'palette-grid' });
+  for (const p of PALETTES) {
+    const [bg, accent, ink] = PALETTE_SWATCH[p];
+    const isCurrent = p === current;
+    const card = h('button', {
+      class: 'palette-card' + (isCurrent ? ' current' : ''),
+      type: 'button',
+      'data-palette': p,
+      onclick: () => { setPalette(p); paint(); },
+    },
+      h('span', { class: 'palette-swatch' },
+        h('span', { style: 'background:' + bg }),
+        h('span', { style: 'background:' + accent }),
+        h('span', { style: 'background:' + ink })),
+      h('span', { class: 'palette-name' }, PALETTE_LABELS[p]),
+      h('span', { class: 'palette-check', html: '✓' }));
+    grid.append(card);
+  }
+  return grid;
+}
+
+/* Curated terminal fonts with guaranteed Unicode box-drawing support.
+   Each stack includes fallbacks so missing fonts gracefully degrade. */
+const TERM_FONTS: Array<{ label: string; stack: string }> = [
+  { label: 'Default', stack: '' },
+  { label: 'SF Mono', stack: '"SF Mono", Monaco, Menlo, monospace' },
+  { label: 'Menlo', stack: 'Menlo, Monaco, monospace' },
+  { label: 'Monaco', stack: 'Monaco, Menlo, monospace' },
+  { label: 'Cascadia Code', stack: '"Cascadia Code", "Cascadia Mono", Consolas, monospace' },
+  { label: 'Consolas', stack: 'Consolas, "Courier New", monospace' },
+  { label: 'JetBrains Mono', stack: '"JetBrains Mono", Menlo, monospace' },
+  { label: 'Fira Code', stack: '"Fira Code", "Fira Mono", monospace' },
+  { label: 'DejaVu Sans Mono', stack: '"DejaVu Sans Mono", monospace' },
+  { label: 'Liberation Mono', stack: '"Liberation Mono", monospace' },
+  { label: 'Courier New', stack: '"Courier New", Courier, monospace' },
+];
+
+const TERM_FONT_SIZES = [10, 11, 12, 12.5, 13, 14, 15, 16, 18];
+const DEFAULT_FONT_SIZE = 12.5;
+
+function buildFontSelect(): HTMLElement {
+  const sel = selectEl(
+    TERM_FONTS.map(f => [f.stack, f.label]),
+    db.prefs.font || '');
+  sel.addEventListener('change', () => setTerminalFont(sel.value === '' ? null : sel.value));
+  return sel;
+}
+
+function buildFontSizeSelect(): HTMLElement {
+  const current = db.prefs.fontSize || DEFAULT_FONT_SIZE;
+  const opts: Array<[string, string]> = TERM_FONT_SIZES.map(s => [String(s), s === DEFAULT_FONT_SIZE ? s + ' (default)' : String(s)]);
+  const sel = selectEl(opts, String(current));
+  sel.addEventListener('change', () => {
+    const v = parseFloat(sel.value);
+    setTerminalFontSize(Number.isFinite(v) ? v : undefined);
+  });
+  return sel;
+}
+
+function buildAppearanceSection(paint: () => void): HTMLElement {
+  return h('div', { class: 'settings-section' },
+    field('Theme', buildModeSeg(paint)),
+    field('Palette', buildPaletteGrid(paint)),
+    field('Terminal font', buildFontSelect()),
+    field('Font size', buildFontSizeSelect()));
+}
+
+/* ---------------- Terminal ---------------- */
+
+type ShellValue = NonNullable<Prefs['shell']>;
+
+const SHELLS: Array<[ShellValue, string]> = [
+  ['system', 'System default ($SHELL)'],
+  ['zsh', 'zsh'],
+  ['bash', 'bash'],
+  ['fish', 'fish'],
+  ['powershell', 'PowerShell'],
+  ['cmd', 'Command Prompt'],
+  ['gitbash', 'Git Bash'],
+  ['wsl', 'WSL'],
+];
+
+function buildShellSelect(): HTMLElement {
+  const sel = selectEl(SHELLS, db.prefs.shell || 'system');
+  sel.addEventListener('change', () => setPref('shell', sel.value as ShellValue));
+  return sel;
+}
+
+function buildTerminalSection(paint: () => void): HTMLElement {
+  return h('div', { class: 'settings-section' },
+    field('Shell', buildShellSelect()),
+    hint('Used by new terminals; open panes keep their shell until closed.'));
+}
+
+/* ---------------- Keybindings ---------------- */
+
+interface KeyAction {
+  id: ActionId;
+  label: string;
+}
+
+const KEY_ACTIONS: KeyAction[] = [
+  { id: 'palette', label: 'Open search palette' },
+  { id: 'splitDefault', label: 'Split pane (default direction)' },
+  { id: 'splitAlt', label: 'Split pane (alternate direction)' },
+];
+
+const FIXED_KEY_ROWS: Array<[string, string]> = [
+  ['Copy selection', 'Ctrl+C'],
+  ['Paste', 'Ctrl+V'],
+  ['Close modal', 'Esc'],
+];
+
+function keyRow(action: KeyAction, paint: () => void): HTMLElement {
+  const chip = h('button', {
+    class: 'key-chip',
+    type: 'button',
+    title: 'Click, then press the new shortcut',
+    onclick: () => startKeyCapture(action, chip, paint),
+  }, formatAccel(accelFor(action.id)));
+  return h('div', { class: 'keys-row' },
+    h('span', { class: 'keys-label' }, action.label),
+    chip);
+}
+
+function fixedKeyRow(label: string, accel: string): HTMLElement {
+  return h('div', { class: 'keys-row' },
+    h('span', { class: 'keys-label' }, label),
+    h('span', { class: 'key-chip static' }, accel));
+}
+
+function accelFromEvent(e: KeyboardEvent): string | null {
+  const mods = [
+    e.ctrlKey && 'ctrl',
+    e.metaKey && 'meta',
+    e.altKey && 'alt',
+    e.shiftKey && 'shift',
+  ].filter((m): m is string => !!m);
+  /* at least one modifier, so plain typing can never be bound */
+  if (!mods.length) return null;
+  return [...mods, e.key.toLowerCase()].join('+');
+}
+
+/* one-shot key capture for rebinding. Listens on window in the capture
+   phase so the global shortcut handler (document bubble) never sees the
+   keystroke; a pointerdown outside the chip cancels. */
+function startKeyCapture(action: KeyAction, chip: HTMLElement, paint: () => void): void {
+  chip.classList.add('capturing');
+  chip.textContent = 'Press keys…';
+  const cleanup = (): void => {
+    window.removeEventListener('keydown', onKey, true);
+    window.removeEventListener('pointerdown', onOutside, true);
+  };
+  function onKey(e: KeyboardEvent): void {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.key === 'Escape') { cleanup(); paint(); return; }
+    if (['Control', 'Shift', 'Alt', 'Meta'].includes(e.key)) return;
+    const accel = accelFromEvent(e);
+    if (!accel) return;
+    cleanup();
+    const clash = KEY_ACTIONS.find(o => o.id !== action.id && accelFor(o.id) === accel);
+    if (clash) {
+      chip.classList.remove('capturing');
+      chip.textContent = 'Used by \u201C' + clash.label + '\u201D';
+      setTimeout(paint, 1400);
+      return;
+    }
+    db.prefs.shortcuts = { ...(db.prefs.shortcuts || {}), [action.id]: accel };
+    void window.bentomux.setPrefs({ shortcuts: db.prefs.shortcuts });
+    paint();
+  }
+  function onOutside(e: PointerEvent): void {
+    if (e.target === chip) return;
+    cleanup();
+    paint();
+  }
+  window.addEventListener('keydown', onKey, true);
+  window.addEventListener('pointerdown', onOutside, true);
+}
+
+function buildKeysSection(paint: () => void): HTMLElement {
+  const rows = h('div', { class: 'keys-list' });
+  for (const a of KEY_ACTIONS) rows.append(keyRow(a, paint));
+  for (const [label, accel] of FIXED_KEY_ROWS) rows.append(fixedKeyRow(label, accel));
+  return h('div', { class: 'settings-section' },
+    rows,
+    hint('Click a shortcut, then press the new combination. Escape cancels.'));
+}
+
+/* ---------------- Notifications (approval overlay + hooks) ---------------- */
+
+function notifToggle(key: 'notifEnabled' | 'notifSound', paint: () => void): HTMLElement {
+  return toggleSeg(db.prefs[key] !== false, on => setPref(key, on, paint));
+}
+
+function buildNotificationsSection(paint: () => void): HTMLElement {
+  const statusLine = h('span', { class: 'settings-hint' }, 'Checking…');
+  const action = h('button', { class: 'btn ghost', type: 'button' }, '…');
+  let current: AgentHooksStatus | null = null;
+
+  const paintStatus = (): void => {
+    if (!current) return;
+    if (current.error) { action.textContent = 'Retry'; statusLine.textContent = current.error; return; }
+    action.textContent = current.installed ? 'Remove hooks' : 'Install hooks';
+    statusLine.textContent = current.installed
+      ? 'Installed — ' + current.settingsPath
+      : 'Not installed';
+  };
+  action.addEventListener('click', () => {
+    if (!current) return;
+    const next = current.installed
+      ? window.bentomux.agentHooksUninstall()
+      : window.bentomux.agentHooksInstall();
+    void next.then(st => { current = st; paintStatus(); });
+  });
+  void window.bentomux.agentHooksStatus().then(st => { current = st; paintStatus(); });
+
+  return h('div', { class: 'settings-section' },
+    field('Notifications', notifToggle('notifEnabled', paint)),
+    hint('Pop the floating approval pill when an agent asks for permission. With this off, decisions still arrive from the phone monitor; on-screen requests are suppressed.'),
+    field('Notification sound', notifToggle('notifSound', paint)),
+    field('Approval hooks', h('div', { class: 'hooks-row' }, action, statusLine)),
+    hint('Claude Code asks Bentomux for permission decisions, answered in the floating overlay. Requires Node on PATH; agents fail open when Bentomux is closed.'));
+}
+
+/* ---------------- modal shell ---------------- */
+
+interface SettingsSection {
+  id: string;
+  label: string;
+  icon: keyof typeof IC;
+  build: (paint: () => void) => HTMLElement;
+}
+
+const SECTIONS: SettingsSection[] = [
+  { id: 'appearance', label: 'Appearance', icon: 'lines', build: buildAppearanceSection },
+  { id: 'terminal', label: 'Terminal', icon: 'term', build: buildTerminalSection },
+  { id: 'keys', label: 'Keybindings', icon: 'key', build: buildKeysSection },
+  { id: 'notifications', label: 'Notifications', icon: 'bell', build: buildNotificationsSection },
+];
+
+export function openSettingsModal(): void {
+  if (currentModal) return; /* one modal at a time — keyboard handler also guards */
+  let activeId = SECTIONS[0].id;
+
+  const menuHost = h('div', { class: 'settings-menu' });
+  const menuItems: Array<{ btn: HTMLElement; id: string }> = [];
+  for (const s of SECTIONS) {
+    const btn = h('button', {
+      class: 'nav-item',
+      type: 'button',
+      onclick: () => { if (activeId !== s.id) { activeId = s.id; paint(); } },
+    }, ic(s.icon), h('span', {}, s.label));
+    menuItems.push({ btn, id: s.id });
+    menuHost.append(btn);
+  }
+
+  const contentHost = h('div', { class: 'settings-content' });
+  function paint(): void {
+    const section = SECTIONS.find(s => s.id === activeId) ?? SECTIONS[0];
+    contentHost.innerHTML = '';
+    contentHost.append(section.build(paint));
+    for (const { btn, id } of menuItems) btn.classList.toggle('active', id === activeId);
+  }
+  paint();
+
+  const modal = openModal({
+    title: 'Settings',
+    body: h('div', { class: 'settings-modal' }, menuHost, contentHost),
+  });
+  const dialog = modal.overlay.querySelector('.dialog');
+  if (dialog) dialog.classList.add('settings-dialog');
+}
