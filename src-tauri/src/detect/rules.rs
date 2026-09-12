@@ -25,12 +25,67 @@ pub enum RegionName {
     OscProgress,
     /* last N non-empty lines, oldest first */
     Bottom(u32),
+    Top(u32),
     /* everything below the last horizontal rule (Claude Code's prompt box) */
     PromptBoxBody,
     /* the non-empty line just above that rule */
     LastLineAbovePromptBox,
     /* last ~40 non-empty lines joined — whole-recent fallback */
     WholeRecent,
+    WholeRecentWithoutCurrentPromptMarker,
+    AfterLastPromptMarker,
+    AfterLastHorizontalRule,
+}
+
+fn region_text(region: &RegionName, screen: &ScreenInput) -> (String, Vec<String>) {
+    let empty = (String::new(), Vec::new());
+    let recent = |n: usize| {
+        let start = screen.lines.len().saturating_sub(n);
+        let lines: Vec<String> = screen.lines[start..].to_vec();
+        (lines.join("\n"), lines)
+    };
+    match region {
+        RegionName::OscTitle => (screen.osc_title.clone(), vec![screen.osc_title.clone()]),
+        RegionName::OscProgress => (screen.osc_progress.clone(), vec![screen.osc_progress.clone()]),
+        RegionName::WholeRecent => recent(40),
+        RegionName::WholeRecentWithoutCurrentPromptMarker => {
+            let mut lines = screen.lines.clone();
+            if let Some(i) = lines.iter().rposition(|l| l.trim_start().starts_with('❯') || l.trim_start().starts_with('>')) {
+                lines.truncate(i);
+            }
+            (lines.join("\n"), lines)
+        }
+        RegionName::AfterLastPromptMarker => {
+            let start = screen.lines.iter().rposition(|l| {
+                let t = l.trim_start();
+                t.starts_with('❯') || t.starts_with('>')
+            }).unwrap_or(0);
+            let lines = screen.lines[start..].to_vec();
+            (lines.join("\n"), lines)
+        }
+        RegionName::AfterLastHorizontalRule | RegionName::PromptBoxBody => {
+            let idx = screen.lines.iter().rposition(|l| rule_line(l));
+            match idx {
+                Some(i) if i + 1 < screen.lines.len() => {
+                    let lines: Vec<String> = screen.lines[i + 1..].to_vec();
+                    (lines.join("\n"), lines)
+                }
+                _ => empty,
+            }
+        }
+        RegionName::LastLineAbovePromptBox => {
+            let idx = screen.lines.iter().rposition(|l| rule_line(l));
+            match idx {
+                Some(i) if i > 0 => (screen.lines[i - 1].clone(), vec![screen.lines[i - 1].clone()]),
+                _ => empty,
+            }
+        }
+        RegionName::Bottom(n) => recent(*n as usize),
+        RegionName::Top(n) => {
+            let lines: Vec<String> = screen.lines.iter().take(*n as usize).cloned().collect();
+            (lines.join("\n"), lines)
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -91,41 +146,6 @@ fn rule_line(line: &str) -> bool {
     count >= 6 && t.chars().count() == count
 }
 
-fn region_text(region: &RegionName, screen: &ScreenInput) -> (String, Vec<String>) {
-    let empty = (String::new(), Vec::new());
-    match region {
-        RegionName::OscTitle => (screen.osc_title.clone(), vec![screen.osc_title.clone()]),
-        RegionName::OscProgress => (screen.osc_progress.clone(), vec![screen.osc_progress.clone()]),
-        RegionName::WholeRecent => {
-            let start = if screen.lines.len() > 40 { screen.lines.len() - 40 } else { 0 };
-            let lines: Vec<String> = screen.lines[start..].to_vec();
-            (lines.join("\n"), lines)
-        }
-        RegionName::PromptBoxBody => {
-            let idx = screen.lines.iter().rposition(|l| rule_line(l));
-            match idx {
-                Some(i) if i + 1 < screen.lines.len() => {
-                    let lines: Vec<String> = screen.lines[i + 1..].to_vec();
-                    (lines.join("\n"), lines)
-                }
-                _ => empty,
-            }
-        }
-        RegionName::LastLineAbovePromptBox => {
-            let idx = screen.lines.iter().rposition(|l| rule_line(l));
-            match idx {
-                Some(i) if i > 0 => (screen.lines[i - 1].clone(), vec![screen.lines[i - 1].clone()]),
-                _ => empty,
-            }
-        }
-        RegionName::Bottom(n) => {
-            let n = *n as usize;
-            let start = if screen.lines.len() > n { screen.lines.len() - n } else { 0 };
-            let lines: Vec<String> = screen.lines[start..].to_vec();
-            (lines.join("\n"), lines)
-        }
-    }
-}
 
 fn matches_matcher(m: &Matcher, text: &str, lines: &[String]) -> bool {
     let contains = m.contains.as_deref().unwrap_or(&[]);
