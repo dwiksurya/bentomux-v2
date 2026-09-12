@@ -161,13 +161,55 @@ fn runtime_state() -> &'static Mutex<Option<RuntimeState>> {
     STATE.get_or_init(|| Mutex::new(None))
 }
 
-const WORKING_PULSE_MS: u64 = 5000;
+const WORKING_PULSE_MS: u64 = 1500;
 
 /* most recent tick's statuses — read by surfaces that don't live in the
    renderer (remote monitor) */
 static LATEST: OnceLock<Mutex<BTreeMap<String, RuntimeStatus>>> = OnceLock::new();
 fn latest() -> &'static Mutex<BTreeMap<String, RuntimeStatus>> {
     LATEST.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+#[derive(Clone)]
+struct ReportedAgent {
+    agent: String,
+    state: AgentRunState,
+}
+
+static REPORTED: OnceLock<Mutex<HashMap<String, ReportedAgent>>> = OnceLock::new();
+fn reported() -> &'static Mutex<HashMap<String, ReportedAgent>> {
+    REPORTED.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+pub fn report_agent_state(pane_id: &str, agent: &str, state: &str, _message: Option<String>) {
+    let state = match state {
+        "working" => AgentRunState::Working,
+        "blocked" => AgentRunState::Blocked,
+        "idle" => AgentRunState::Idle,
+        _ => return,
+    };
+    reported().lock().unwrap().insert(pane_id.to_string(), ReportedAgent {
+        agent: agent.to_string(), state,
+    });
+}
+
+pub fn clear_reported_agent(pane_id: &str) {
+    reported().lock().unwrap().remove(pane_id);
+}
+
+pub fn has_reported_agent(pane_id: &str) -> bool {
+    reported().lock().unwrap().contains_key(pane_id)
+}
+static USER_INPUT_AT: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
+fn user_input_at() -> &'static Mutex<HashMap<String, u64>> {
+    USER_INPUT_AT.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+pub fn note_user_input(pane_id: &str) {
+    user_input_at().lock().unwrap().insert(pane_id.to_string(), now_ms());
+}
+
+fn input_is_recent(pane_id: &str) -> bool {
+    now_ms().saturating_sub(user_input_at().lock().unwrap().get(pane_id).copied().unwrap_or(0)) < 750
 }
 
 pub fn latest_runtime_statuses() -> BTreeMap<String, RuntimeStatus> {
@@ -222,12 +264,22 @@ const NAME_RE: &[(&str, &str)] = &[
     ("codex", r"^codex(-[\w.]+)?(\.exe|\.cmd|\.bat)?$"),
     ("gemini", r"^gemini(-[\w.]+)?(\.exe|\.cmd|\.bat)?$"),
     ("opencode", r"^opencode(-[\w.]+)?(\.exe|\.cmd|\.bat)?$"),
-    ("copilot", r"^copilot(-[\w.]+)?(\.exe|\.cmd|\.bat)?$"),
+    ("copilot", r"^(copilot|ghcs)(\.exe|\.cmd|\.bat)?$"),
     ("cursor", r"^cursor-agent(\.exe|\.cmd|\.bat)?$"),
     ("grok", r"^grok(\.exe|\.cmd|\.bat)?$"),
+    ("omp", r"^(omp|oh-my-pi)(\.exe|\.cmd|\.bat)?$"),
+    ("amp", r"^amp(\.exe|\.cmd|\.bat)?$"),
+    ("antigravity", r"^antigravity(-cli)?(\.exe|\.cmd|\.bat)?$"),
+    ("cline", r"^cline(\.exe|\.cmd|\.bat)?$"),
+    ("devin", r"^devin(-cli)?(\.exe|\.cmd|\.bat)?$"),
+    ("hermes", r"^hermes(-agent)?(\.exe|\.cmd|\.bat)?$"),
+    ("kiro", r"^kiro(-cli)?(\.exe|\.cmd|\.bat)?$"),
+    ("maki", r"^maki(\.exe|\.cmd|\.bat)?$"),
+    ("muse", r"^muse(-code|-cli)?(\.exe|\.cmd|\.bat)?$"),
+    ("qodercli", r"^qoder(?:cli|cn)?(\.exe|\.cmd|\.bat)?$"),
 ];
 
-const MINOR_RE: &str = r"^(qwenpaw|qwen|kimi|kilo|droid|amp)(-code)?(\.exe|\.cmd|\.bat)?$";
+const MINOR_RE: &str = r"^(qwenpaw|qwen|kimi|kilo|droid)(-code)?(\.exe|\.cmd|\.bat)?$";
 
 fn match_agent(name: &str, cmd: Option<&str>) -> Option<&'static str> {
     let n = name.to_lowercase();
@@ -255,6 +307,15 @@ fn match_agent(name: &str, cmd: Option<&str>) -> Option<&'static str> {
     }
     if c.contains("@openai/codex") || c.contains("@openai\\codex") {
         return Some("codex");
+    }
+    if c.contains("@earendil-works/pi-coding-agent")
+        || c.contains("@mariozechner/pi-coding-agent")
+        || c.contains(".pi/agent") || c.contains(".pi\\agent")
+    {
+        return Some("pi");
+    }
+    if c.contains("oh-my-pi") || c.contains("oh_my_pi") || c.contains("/omp") || c.contains("\\\\omp") {
+        return Some("omp");
     }
     if c.contains("@google/gemini-cli") || c.contains("@google\\gemini-cli") {
         return Some("gemini");
@@ -289,7 +350,7 @@ fn snapshot() -> Vec<Proc> {
             pid: pid.as_u32(),
             ppid: p.parent().map(|pp| pp.as_u32()).unwrap_or(0),
             name: p.name().to_string_lossy().to_string(),
-            cmd: p.cmd().first().map(|c| c.to_string_lossy().to_string()),
+            cmd: if p.cmd().is_empty() { None } else { Some(p.cmd().iter().map(|c| c.to_string_lossy()).collect::<Vec<_>>().join(" ")) },
         })
         .collect()
 }
@@ -325,8 +386,10 @@ fn deepest_match(start_pid: u32, by_parent: &HashMap<u32, Vec<&Proc>>) -> Option
     best
 }
 
+
 fn status_for(tab_id: &str, match_: Option<Match>) -> RuntimeStatus {
     let Some(m) = match_ else {
+        clear_reported_agent(tab_id);
         return RuntimeStatus { running: false, runtime: None, state: None, matched_rule: None, source: None };
     };
     let mut base = RuntimeStatus {
@@ -336,27 +399,33 @@ fn status_for(tab_id: &str, match_: Option<Match>) -> RuntimeStatus {
         matched_rule: None,
         source: None,
     };
+    if let Some(reported) = reported().lock().unwrap().get(tab_id).cloned() {
+        base.runtime = Some(reported.agent);
+        base.state = Some(reported.state);
+        base.source = Some("integration".to_string());
+        return base;
+    }
     let (osc_title, osc_progress, last_data_at) = screen::screen_meta(tab_id);
     let lines = screen::screen_lines(tab_id);
     let manifest = manifest_for(&m.agent);
 
-    let (Some(manifest), false) = (manifest.as_ref(), lines.is_empty()) else {
-        /* no screen authority: activity pulse decides */
-        let state = if now_ms().saturating_sub(last_data_at) < WORKING_PULSE_MS {
-            AgentRunState::Working
-        } else {
-            AgentRunState::Idle
-        };
-        base.state = Some(state);
+    let Some(manifest) = manifest.as_ref().filter(|_| !lines.is_empty()) else {
+        let working = !input_is_recent(tab_id)
+            && now_ms().saturating_sub(last_data_at) < WORKING_PULSE_MS;
+        base.state = Some(if working { AgentRunState::Working } else { AgentRunState::Idle });
         base.source = Some("activity".to_string());
         return base;
     };
 
-    let det = rules::evaluate(manifest, &rules::ScreenInput {
-        osc_title,
-        osc_progress,
-        lines,
-    });
+    let det = rules::evaluate(manifest, &rules::ScreenInput { osc_title, osc_progress, lines });
+    if det.state.is_none() && m.agent == "pi" {
+        let working = !input_is_recent(tab_id)
+            && now_ms().saturating_sub(last_data_at) < WORKING_PULSE_MS;
+        base.state = Some(if working { AgentRunState::Working } else { AgentRunState::Idle });
+        base.source = Some("activity".to_string());
+        return base;
+    }
+
 
     if det.skip_state_update {
         /* transient overlay (transcript view, pickers): hold the previous state */
@@ -405,7 +474,7 @@ pub fn init(app: tauri::AppHandle) {
     std::thread::spawn(move || {
         let mut last_json = String::new();
         loop {
-            std::thread::sleep(std::time::Duration::from_millis(2000));
+            std::thread::sleep(std::time::Duration::from_millis(1000));
             let terms = app.state::<PtyManager>().live_terms();
             if terms.is_empty() {
                 publish(&BTreeMap::new());
@@ -589,6 +658,13 @@ mod tests {
     }
 
     #[test]
+    fn match_agent_recognizes_omp_and_pi_wrappers() {
+        assert_eq!(match_agent("omp", None), Some("omp"));
+        assert_eq!(match_agent("node", Some("node ./oh-my-pi/bin/omp")), Some("omp"));
+        assert_eq!(match_agent("node", Some("node @mariozechner/pi-coding-agent")), Some("pi"));
+    }
+
+    #[test]
     fn deepest_match_respects_start_identity_miss() {
         /* the start process itself matches nothing even if it is a real agent;
            we only look at descendants, mirroring the TS behavior */
@@ -605,5 +681,13 @@ mod tests {
         ];
         /* must terminate (depth cap) without hanging */
         assert!(deepest_match(1, &parent_map(&procs)).is_none());
+    }
+    #[test]
+    fn missing_agent_process_clears_reported_state() {
+        report_agent_state("pane-quit", "pi", "working", None);
+        let status = status_for("pane-quit", None);
+        assert!(!status.running);
+        assert!(status.runtime.is_none());
+        assert!(!has_reported_agent("pane-quit"));
     }
 }

@@ -230,6 +230,7 @@ impl PtyManager {
     }
 
     pub fn write_term(&self, id: &str, data: &str) -> Result<(), String> {
+        crate::runtime::note_user_input(id);
         let mut map = self.terms.lock().unwrap();
         let Some(term) = map.get_mut(id) else {
             return Err(format!("Terminal not found: {}", id));
@@ -237,10 +238,8 @@ impl PtyManager {
         let Some(writer) = term.writer.as_mut() else {
             return Err(format!("Terminal writer unavailable: {}", id));
         };
-        writer
-            .write_all(data.as_bytes())
-            .and_then(|_| writer.flush())
-            .map_err(|e| format!("Write failed: {}", e))
+        writer.write_all(data.as_bytes()).map_err(|e| format!("PTY write failed: {}", e))?;
+        writer.flush().map_err(|e| format!("PTY flush failed: {}", e))
     }
 
     pub fn resize_term(&self, id: &str, cols: u16, rows: u16) -> Result<(), String> {
@@ -253,7 +252,11 @@ impl PtyManager {
         }
         term.master
             .resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
-            .map_err(|e| format!("Resize failed: {}", e))
+            .map_err(|e| format!("Resize failed: {}", e))?;
+        /* keep the headless screen model (remote mirror) in step with the
+           real terminal so its column-position parsing doesn't drift */
+        crate::detect::screen::resize(id, cols, rows);
+        Ok(())
     }
 
     pub fn kill_term(&self, id: &str) -> bool {
