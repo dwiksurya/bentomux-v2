@@ -2282,8 +2282,30 @@ sudo apt install libwebkit2gtk-4.0-dev
 
 ---
 
-## Validation Checklist
+## Current Verification Evidence
 
+The following checks are verified in the Tauri v2 port:
+
+- Rust test suite: 88 tests passed.
+- Frontend typecheck and Vite production build: passed.
+- macOS `Bentomux.app`: built successfully; app bundle measured at 7.6 MB.
+- macOS DMG: `Bentomux_0.1.0_x64.dmg` built successfully; measured at 4,248,074 bytes.
+- Bundled resources: `bentomux-hook.cjs`, `remote-page.html`, and agent manifests were present in the app bundle before DMG packaging.
+- Backend startup readiness: release binary samples 1,738 ms, 1,640 ms, and 1,281 ms; median 1,640 ms.
+- Release-process RSS sample: 96,916 KB (approximately 94.6 MB) at idle after launch; this exceeds the 50–80 MB target and is one sample, not a leak result.
+
+Still requiring platform evidence before marking this migration complete:
+
+- Windows named-pipe approval lifecycle and Windows MSI.
+- Linux AppImage and Linux runtime smoke test.
+- Native end-to-end workspace, terminal, git, remote, and approval flow.
+- Release idle-memory and one-hour leak measurements.
+- Final cross-platform verification matrix.
+
+---
+
+
+## Validation Checklist
 ### Core Features
 - [ ] Launch app, main window appears
 - [ ] Add workspace, folder appears in sidebar
