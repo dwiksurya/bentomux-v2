@@ -7,13 +7,12 @@
 <style>
   html, body {
     margin: 0;
-    /* window is not native-transparent on macOS (would need macos-private-api);
-       give the page the same themed background so it covers the whole window
-       and reads as a solid floating pill */
-    background: var(--bg, rgba(255, 255, 255, .96));
+    background: transparent;
     width: 100%;
     height: 100%;
     overflow: hidden;
+    border-radius: 16px;
+    clip-path: inset(0 round 16px);
     font-family: 'Segoe UI', system-ui, sans-serif;
   }
   @keyframes island-in {
@@ -26,11 +25,11 @@
     box-sizing: border-box;
     display: flex;
     flex-direction: column;
-    background: var(--bg, rgba(255, 255, 255, .88));
-    border: 1px solid var(--border, rgba(0, 0, 0, .14));
+    background: var(--bg, rgba(18, 18, 22, .96));
+    border: 1px solid var(--border, rgba(255, 255, 255, .18));
     border-radius: 16px;
     padding: 14px 16px;
-    box-shadow: var(--shadow, 0 12px 36px rgba(32, 29, 25, .22));
+    box-shadow: var(--shadow, 0 12px 40px rgba(0, 0, 0, .45));
     font-size: 12px;
     color: var(--ink, #1f2328);
     animation: island-in .22s cubic-bezier(.2, .9, .25, 1.15) both;
@@ -72,6 +71,7 @@
   button:hover { background: var(--btn-hover, rgba(0, 0, 0, .08)); }
   .approve { background: #2563eb; color: #fff; }
   .approve:hover { background: #1d4ed8; }
+  button { user-select: none; }
 </style>
 </head>
 <body>
