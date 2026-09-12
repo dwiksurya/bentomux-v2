@@ -1,9 +1,12 @@
-/* ---------------- remote monitor: dock button + popover ----------------
+/* ---------------- remote control: dock button + popover ----------------
    Sits next to the settings gear at the bottom of the sidebar. Clicking
    it turns remote access ON (first click) and opens a popover with the
-   pairing QR, the port field, and the on/off switch. The panel is
-   appended to document.body — the sidebar re-renders on every runtime
-   status tick, which would otherwise destroy an open panel. */
+   pairing QR, the port field, and the on/off switch. Remote is HTTPS-
+   only via the bundled cloudflared quick tunnel — no plain-HTTP LAN path.
+   The pairing URL grants FULL CONTROL (type into panes), so the panel
+   warns accordingly. The panel is appended to document.body — the sidebar
+   re-renders on every runtime status tick, which would otherwise destroy
+   an open panel. */
 
 import { h } from '../dom';
 import { field } from '../components/modal';
@@ -31,6 +34,14 @@ async function refresh(): Promise<void> {
   if (panel) paintPanel();
 }
 
+function pollTunnel(attempt = 0): void {
+  /* the trycloudflare URL arrives asynchronously from cloudflared's stderr (takes ~6s) */
+  if (attempt >= 30 || info?.tunnelUrl || info?.tunnelError) return;
+  window.setTimeout(() => {
+    void refresh().then(() => pollTunnel(attempt + 1));
+  }, 1000);
+}
+
 async function applyEnabled(on: boolean): Promise<void> {
   try {
     info = await window.bentomux.remoteSetEnabled(on);
@@ -39,6 +50,7 @@ async function applyEnabled(on: boolean): Promise<void> {
   }
   updateDockDot();
   if (panel) paintPanel();
+  if (on && info?.enabled && !info.tunnelUrl && !info.tunnelError) pollTunnel();
 }
 
 /* ---------------- dock button (rendered on every sidebar render) ---------------- */
@@ -48,8 +60,8 @@ export function remoteDockButton(): HTMLElement {
   const btn = h('button', {
     class: 'iconbtn sidebar-remote' + (panel ? ' active' : ''),
     type: 'button',
-    title: 'Remote access from phone',
-    'aria-label': 'Remote access from phone',
+    title: 'Remote control from phone',
+    'aria-label': 'Remote control from phone',
     onclick: () => { if (panel) closePanel(); else openPanel(); },
   }, ic('phone'), h('span', { class: 'dock-dot' + (info?.running ? ' on' : '') }));
   return btn;
@@ -68,8 +80,6 @@ function openPanel(): void {
     panel.style.bottom = Math.round(window.innerHeight - r.top + 8) + 'px';
   }
   paintPanel();
-  /* "klik langsung on": first open while disabled turns it on */
-  if (info && !info.enabled) void applyEnabled(true);
   window.addEventListener('pointerdown', onOutside, true);
   window.addEventListener('keydown', onKey, true);
 }
@@ -131,7 +141,7 @@ function paintPanel(): void {
     h('button', { onclick: () => void applyEnabled(false) }, 'Off'),
     h('button', { onclick: () => void applyEnabled(true) }, 'On'));
   syncSeg(seg, info.enabled ? 1 : 0);
-  body.append(field('Remote access', seg));
+  body.append(field('Remote control', seg));
 
   if (info.enabled) {
     const portInput = h('input', { type: 'number', min: '1024', max: '65535', value: info.port }) as HTMLInputElement;
@@ -141,6 +151,7 @@ function paintPanel(): void {
     });
     body.append(field('Port', portInput));
 
+    /* the tunnel URL (https://…trycloudflare.com) is now THE pairing URL */
     if (info.running && info.urls.length && info.qr) {
       const urlInput = h('input', { class: 'remote-url', readonly: true, value: info.urls[0] }) as HTMLInputElement;
       const copyBtn = h('button', { class: 'btn ghost', type: 'button', onclick: () => copyUrl(info!.urls[0], copyBtn) }, 'Copy URL');
@@ -148,13 +159,21 @@ function paintPanel(): void {
         field('Pairing', h('div', { class: 'remote-pair' }, h('img', { src: info.qr, alt: 'Pairing QR code' }))),
         field('Pairing URL', h('div', { class: 'remote-urlrow' }, urlInput, copyBtn)),
       );
+      body.append(h('div', { class: 'settings-hint' },
+        'Scan with your phone — works anywhere thanks to HTTPS via Cloudflare. The URL grants full control: typing, panes, and agent approvals. Keep it secret.'));
+    } else if (info.tunnelError) {
+      body.append(h('div', { class: 'settings-hint' }, info.tunnelError));
     } else if (info.error) {
       body.append(h('div', { class: 'settings-hint' }, info.error));
     } else {
-      body.append(h('div', { class: 'settings-hint' }, 'Starting…'));
+      /* tunnel URL hasn't arrived yet (cloudflared stderr is async) */
+      body.append(h('div', { class: 'settings-hint' }, info.running ? 'Starting secure tunnel…' : 'Starting…'));
+    }
+    if (info.running && !info.urls.length && !info.tunnelError && !info.error) {
+      void pollTunnel();
     }
     body.append(h('div', { class: 'settings-hint' },
-      'Scan with your phone (same Wi-Fi) to watch terminals and answer agent approvals. Read-only except approve/deny.'));
+      'Local server is loopback-only (http://127.0.0.1) — reachable from this machine. The pairing URL above is public HTTPS (CA-signed, no browser warning). Traffic is relayed through Cloudflare and requires the pairing token.'));
   }
 
   panel.append(body);

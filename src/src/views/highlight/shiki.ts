@@ -55,11 +55,8 @@ const SHIKI_LANG: Record<LangId, ShikiLang> = {
   dart: 'dart',
 };
 
-/* languages to preload at boot — the ones most users will open first.
-   5 grammars is <100KB and avoids a visible stall on the first diff. */
-const PRELOAD_LANGS: readonly LangId[] = ['js', 'ts', 'py', 'go', 'rs'];
-
 let highlighterPromise: Promise<HighlighterCore> | null = null;
+const languagePromises = new Map<ShikiLang, Promise<void>>();
 
 /* dynamic import map for all 29 languages we support. Vite code-splits each
    entry, so unused grammars are never downloaded. Keyed by Shiki's full
@@ -96,30 +93,16 @@ const LANG_LOADERS: Partial<Record<ShikiLang, () => Promise<{ default: LanguageI
   dart: () => import('@shikijs/langs/dart'),
 };
 
-async function preloadLanguages(): Promise<LanguageInput[]> {
-  return Promise.all(
-    PRELOAD_LANGS.map(async (id) => {
-      const shikiId = SHIKI_LANG[id];
-      const loader = LANG_LOADERS[shikiId];
-      if (!loader) throw new Error(`preload lang "${id}" has no loader`);
-      const mod = await loader();
-      return mod.default;
-    }),
-  );
-}
 
 async function getHighlighter(): Promise<HighlighterCore> {
   if (!highlighterPromise) {
     highlighterPromise = (async () => {
       const { createHighlighterCore } = await import('shiki/core');
       const { createJavaScriptRegexEngine } = await import('@shikijs/engine-javascript');
-      const { default: githubDark } = await import('@shikijs/themes/github-dark');
-      const langs = await preloadLanguages();
       return createHighlighterCore({
-        /* github-dark is required by codeToTokens even though we strip
-           the colors — we only consume the TextMate scope explanations. */
-        themes: [githubDark],
-        langs,
+        /* Tokenization only needs scope explanations; CSS owns all colors. */
+        themes: [{ name: 'bentomux', settings: [] }],
+        langs: [],
         engine: createJavaScriptRegexEngine({ forgiving: true }),
       });
     })();
@@ -139,12 +122,24 @@ export async function ensureLang(lang: LangId): Promise<ShikiLang | null> {
   const hl = await getHighlighter();
   const shikiId = SHIKI_LANG[lang];
   if (!shikiId) return null;
-  const loaded = hl.getLoadedLanguages();
-  if (loaded.includes(shikiId)) return shikiId;
+  if (hl.getLoadedLanguages().includes(shikiId)) return shikiId;
   const loader = LANG_LOADERS[shikiId];
   if (!loader) return null;
-  const mod = await loader();
-  await hl.loadLanguage(mod.default);
+
+  let loading = languagePromises.get(shikiId);
+  if (!loading) {
+    loading = (async () => {
+      const mod = await loader();
+      if (!hl.getLoadedLanguages().includes(shikiId)) await hl.loadLanguage(mod.default);
+    })();
+    languagePromises.set(shikiId, loading);
+  }
+  try {
+    await loading;
+  } catch (error) {
+    languagePromises.delete(shikiId);
+    throw error;
+  }
   return shikiId;
 }
 

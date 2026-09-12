@@ -549,24 +549,54 @@ pub fn agent_approval_resolve(request_id: String, decision: String) -> bool {
     }
 }
 
-/* overlay Jump button: bring Bentomux forward and land on the pane */
+#[tauri::command]
+pub fn agent_approval_pending() -> Option<crate::bridge::AgentApprovalRequest> {
+    crate::bridge::pending_approval()
+}
+
+/* overlay Jump: hide the approval window first, then explicitly foreground
+   Bentomux so the click cannot leave the always-on-top overlay in front. */
 #[tauri::command]
 pub fn agent_approval_jump(app: tauri::AppHandle, pane_id: Option<String>, cwd: Option<String>) {
+    if let Some(overlay) = app.get_webview_window("approval-overlay") {
+        let _ = overlay.set_always_on_top(false);
+        let _ = overlay.hide();
+    }
     if let Some(w) = app.get_webview_window("main") {
         if w.is_minimized().unwrap_or(false) {
             let _ = w.unminimize();
         }
         let _ = w.show();
+        let _ = w.set_always_on_top(true);
         let _ = w.set_focus();
+        let _ = w.set_always_on_top(false);
     }
-    crate::bridge::emit_agent_event(&crate::bridge::AgentEventNotice {
+    let notice = crate::bridge::AgentEventNotice {
         kind: "jump".into(),
         pane_id,
         agent: "claude".into(),
         message: String::new(),
         cwd,
         session_id: None,
+    };
+    let retry_app = app.clone();
+    let retry_notice = notice.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(120));
+        if let Some(w) = retry_app.get_webview_window("main") {
+            let _ = w.show();
+            let _ = w.set_focus();
+        }
+        let _ = retry_app.emit_to("main", "agent:event", &retry_notice);
     });
+    let _ = app.emit_to("main", "agent:event", &notice);
+}
+
+#[tauri::command]
+pub fn agent_approval_hide(app: tauri::AppHandle) {
+    if let Some(w) = app.get_webview_window("approval-overlay") {
+        let _ = w.hide();
+    }
 }
 
 /* report the active terminal tab's anchor pane so the approval overlay

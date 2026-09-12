@@ -28,11 +28,10 @@ export async function tokenize(text: string, lang: LangId | null): Promise<Token
   if (!shikiId) return [];
 
   /* We feed Shiki the line and ask for explanations so we can read the
-     TextMate scope stack. The colors from `github-dark` are ignored — the
-     CSS palette owns the rendering via `.syn-*` rules. */
+     TextMate scope stack. CSS owns the rendering via `.syn-*` rules. */
   const result = hl.codeToTokens(text, {
     lang: shikiId,
-    theme: 'github-dark',
+    theme: 'bentomux',
     includeExplanation: 'scopeName',
   });
 

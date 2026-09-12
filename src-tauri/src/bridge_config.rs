@@ -28,12 +28,16 @@ pub fn bridge_address() -> String {
     }
 }
 
-/* spread into the env of every spawned shell so hook CLIs running inside
-   it know which pane they belong to and where the bridge lives */
+/* expose both Bentomux names and the Herdr-compatible names consumed by the
+   Pi/OMP integrations supplied in integration_assets */
 pub fn bridge_env_for(pane_id: &str) -> HashMap<String, String> {
+    let address = bridge_address();
     HashMap::from([
         (BRIDGE_PANE_ENV.to_string(), pane_id.to_string()),
-        (BRIDGE_ADDR_ENV.to_string(), bridge_address()),
+        (BRIDGE_ADDR_ENV.to_string(), address.clone()),
+        ("HERDR_ENV".to_string(), "1".to_string()),
+        ("HERDR_SOCKET_PATH".to_string(), address),
+        ("HERDR_PANE_ID".to_string(), pane_id.to_string()),
     ])
 }
 
@@ -64,5 +68,13 @@ mod tests {
         let env = bridge_env_for("t-abc");
         assert_eq!(env.get(BRIDGE_PANE_ENV).map(String::as_str), Some("t-abc"));
         assert_eq!(env.get(BRIDGE_ADDR_ENV).map(String::as_str), Some(bridge_address().as_str()));
+    }
+
+    #[test]
+    fn test_herdr_bridge_env_pairs() {
+        let env = bridge_env_for("t-omp");
+        assert_eq!(env.get("HERDR_ENV").map(String::as_str), Some("1"));
+        assert_eq!(env.get("HERDR_PANE_ID").map(String::as_str), Some("t-omp"));
+        assert_eq!(env.get("HERDR_SOCKET_PATH").map(String::as_str), Some(bridge_address().as_str()));
     }
 }

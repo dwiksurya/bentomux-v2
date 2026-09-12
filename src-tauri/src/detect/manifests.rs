@@ -186,11 +186,87 @@ pub fn claude_manifest() -> super::rules::AgentManifest {
     }
 }
 
+#[derive(serde::Deserialize)]
+struct RawManifest {
+    id: String,
+    #[serde(default)]
+    aliases: Vec<String>,
+    rules: Vec<RawRule>,
+}
+
+#[derive(serde::Deserialize)]
+struct RawRule {
+    id: String,
+    state: RunState,
+    priority: i32,
+    region: String,
+    #[serde(default)]
+    skip_state_update: bool,
+    #[serde(flatten)]
+    matcher: Matcher,
+}
+
+const TOML_MANIFESTS: &[(&str, &str)] = &[
+    ("amp", include_str!("../../../resources/manifests/amp.toml")),
+    ("antigravity", include_str!("../../../resources/manifests/antigravity.toml")),
+    ("claude", include_str!("../../../resources/manifests/claude.toml")),
+    ("cline", include_str!("../../../resources/manifests/cline.toml")),
+    ("codex", include_str!("../../../resources/manifests/codex.toml")),
+    ("cursor", include_str!("../../../resources/manifests/cursor.toml")),
+    ("devin", include_str!("../../../resources/manifests/devin.toml")),
+    ("droid", include_str!("../../../resources/manifests/droid.toml")),
+    ("gemini", include_str!("../../../resources/manifests/gemini.toml")),
+    ("copilot", include_str!("../../../resources/manifests/github-copilot.toml")),
+    ("grok", include_str!("../../../resources/manifests/grok.toml")),
+    ("hermes", include_str!("../../../resources/manifests/hermes.toml")),
+    ("kilo", include_str!("../../../resources/manifests/kilo.toml")),
+    ("kimi", include_str!("../../../resources/manifests/kimi.toml")),
+    ("kiro", include_str!("../../../resources/manifests/kiro.toml")),
+    ("maki", include_str!("../../../resources/manifests/maki.toml")),
+    ("muse", include_str!("../../../resources/manifests/muse.toml")),
+    ("opencode", include_str!("../../../resources/manifests/opencode.toml")),
+    ("pi", include_str!("../../../resources/manifests/pi.toml")),
+    ("qodercli", include_str!("../../../resources/manifests/qodercli.toml")),
+    ("qwen", include_str!("../../../resources/manifests/qwen.toml")),
+];
+
+fn parse_region(raw: &str) -> Option<RegionName> {
+    let number = |prefix: &str| raw.strip_prefix(prefix)?.strip_suffix(')')?.parse().ok();
+    Some(match raw {
+        "osc_title" => RegionName::OscTitle,
+        "osc_progress" => RegionName::OscProgress,
+        "whole_recent" => RegionName::WholeRecent,
+        "whole_recent_without_current_prompt_marker" => RegionName::WholeRecentWithoutCurrentPromptMarker,
+        "after_last_prompt_marker" => RegionName::AfterLastPromptMarker,
+        "after_last_horizontal_rule" => RegionName::AfterLastHorizontalRule,
+        "prompt_box_body" => RegionName::PromptBoxBody,
+        "last_non_empty_above_prompt_box" => RegionName::LastLineAbovePromptBox,
+        _ if raw.starts_with("bottom_non_empty_lines(") => RegionName::Bottom(number("bottom_non_empty_lines(")?),
+        _ if raw.starts_with("top_non_empty_lines(") => RegionName::Top(number("top_non_empty_lines(")?),
+        _ => return None,
+    })
+}
+
+fn manifest_from_toml(agent: &str) -> Option<super::rules::AgentManifest> {
+    let (_, source) = TOML_MANIFESTS.iter().find(|(_, source)| {
+        toml::from_str::<RawManifest>(source).map(|m| m.id == agent || m.aliases.iter().any(|a| a == agent)).unwrap_or(false)
+    })?;
+    let raw: RawManifest = toml::from_str(source).ok()?;
+    Some(super::rules::AgentManifest {
+        agent: raw.id,
+        rules: raw.rules.into_iter().filter_map(|r| Some(Rule {
+            id: r.id,
+            state: r.state,
+            priority: r.priority,
+            region: parse_region(&r.region)?,
+            skip_state_update: r.skip_state_update,
+            match_: r.matcher,
+        })).collect(),
+    })
+}
+
 pub fn manifest_for(agent: &str) -> Option<super::rules::AgentManifest> {
-    match agent {
-        "claude" => Some(claude_manifest()),
-        _ => None,
-    }
+    manifest_from_toml(agent)
 }
 
 #[cfg(test)]
@@ -234,5 +310,23 @@ mod tests {
             lines: vec!["plain output".to_string(), "━━━━━━━━━━━━━━".to_string(), "❯".to_string()],
         });
         assert_eq!(d.state, Some(RunState::Idle));
+    }
+    #[test]
+    fn loads_downloaded_manifest_and_alias() {
+        let m = manifest_for("codex").expect("codex manifest");
+        assert!(manifest_for("cursor-agent").is_some());
+        let d = evaluate(&m, &ScreenInput {
+            osc_title: "⠋ working".to_string(),
+            osc_progress: String::new(),
+            lines: vec!["output".to_string()],
+        });
+        assert_eq!(d.state, Some(RunState::Working));
+    }
+    #[test]
+    fn every_supplied_manifest_loads() {
+        for (agent, _) in TOML_MANIFESTS {
+            let manifest = manifest_for(agent).expect("manifest should load");
+            assert!(!manifest.rules.is_empty(), "{agent} has no rules");
+        }
     }
 }

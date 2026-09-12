@@ -22,8 +22,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let process_start = std::time::Instant::now();
     let mut builder = tauri::Builder::default();
-    builder = builder.setup(|app| {
+    builder = builder.setup(move |app| {
+        eprintln!("[perf] backend-ready-ms={}", process_start.elapsed().as_millis());
         use tauri::Emitter;
         use tauri::Manager;
         let handle = app.handle().clone();
@@ -32,11 +34,14 @@ pub fn run() {
         git::init_watch(handle.clone());
         app.manage(state);
         app.manage(pty);
+        /* boot-time remote restore: mirrors Electron's index.ts startRemote()
+           call when prefs.remote.enabled was persisted true from a prior
+           session — otherwise the panel shows "On" but never actually starts. */
+        remote::restore_on_startup(&handle, app.state::<state::AppStateManager>().inner());
         /* agent runtime detection: headless screen feed + process poller */
         runtime::init(handle.clone());
         /* approval bridge: unix socket the managed agent hooks write to */
         bridge::start_bridge(handle.clone(), &app.state::<pty::PtyManager>());
-
         /* track the last-known maximize state on the main window so we only
            emit `win:maximized` on the actual OS transition (mirrors
            Electron's `win.on('maximize'/'unmaximize')` pattern in
@@ -93,7 +98,8 @@ pub fn run() {
             commands::agent_hooks_install,
             commands::agent_hooks_uninstall,
             commands::agent_approval_resolve,
-            commands::agent_approval_jump,
+            commands::agent_approval_pending,
+            commands::agent_approval_hide,
             commands::agent_set_active_tab,
             commands::res_list,
             commands::res_save,
@@ -105,6 +111,7 @@ pub fn run() {
             commands::win_minimize,
             commands::win_toggle_maximize,
             commands::win_toggle_fullscreen,
+            commands::win_close,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -114,7 +121,8 @@ pub fn run() {
                (port of Electron's before-quit → stopBridge in bridge.ts) */
             if let tauri::RunEvent::ExitRequested { .. } = event {
                 bridge::stop_bridge();
-                let _ = crate::remote::stop_remote();
+                crate::remote::stop_tunnel();
+                crate::remote::stop_remote();
             }
         });
 }

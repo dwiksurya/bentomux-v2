@@ -289,7 +289,7 @@ function buildNotificationsSection(paint: () => void): HTMLElement {
 
   return h('div', { class: 'settings-section' },
     field('Notifications', notifToggle('notifEnabled', paint)),
-    hint('Pop the floating approval pill when an agent asks for permission. With this off, decisions still arrive from the phone monitor; on-screen requests are suppressed.'),
+    hint('Shows approval requests and plays status sounds when an agent finishes, becomes blocked, or returns to idle. With this off, on-screen notifications are suppressed; phone approvals still work.'),
     field('Notification sound', notifToggle('notifSound', paint)),
     field('Approval hooks', h('div', { class: 'hooks-row' }, action, statusLine)),
     hint('Claude Code asks Bentomux for permission decisions, answered in the floating overlay. Requires Node on PATH; agents fail open when Bentomux is closed.'));

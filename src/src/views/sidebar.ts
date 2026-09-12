@@ -167,8 +167,6 @@ function confirmRemove(ws: { id: string; name: string; path: string }): void {
 let lastExpanded: Record<string, boolean> | null = null;
 
 function navItem(label: string, iconName: keyof typeof IC, view: Route['view']): HTMLElement {
-  /* the Agents row also reads as active while an agent detail page is open,
-     so the section keeps its highlight through the page → detail drill-in */
   const active = ui.route.view === view
     || (view === 'agents' && ui.route.view === 'agentDetail');
   return h('button', {
@@ -194,6 +192,7 @@ function searchTriggerButton(): HTMLElement {
     h('span', {}, 'Search'),
     h('span', { class: 'shortcut' }, SEARCH_SHORTCUT));
 }
+
 
 function settingsGearButton(): HTMLElement {
   return h('button', {
@@ -354,11 +353,7 @@ export function renderSidebar(): void {
   const nav = $('#nav');
   nav.innerHTML = '';
 
-  nav.append(
-    searchTriggerButton(),
-    navItem('Agents', 'bot', 'agents'),
-    workspaceLabelRow(),
-  );
+  nav.append(searchTriggerButton(), workspaceLabelRow());
 
   renderWorkspaces();
 

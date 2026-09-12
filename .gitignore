@@ -12,3 +12,6 @@ out-test/
 # OS / editor
 .DS_Store
 *.log
+
+# Generated production bundle dependency; prepare:cloudflared downloads it.
+resources/cloudflared/*/*

@@ -325,12 +325,18 @@ export interface RemotePairing {
   running: boolean;
   port: number;
   token: string;
-  /* one URL per non-internal IPv4 interface */
+  /* the single pairing URL (tunnel URL + token); empty while the tunnel
+     URL is still pending */
   urls: string[];
   /* data URL of the primary URL as a QR code; null on failure */
   qr: string | null;
   /* last server start failure (e.g. port already in use) */
   error: string | null;
+  /* cloudflare quick tunnel: the https://trycloudflare.com URL with the
+     token attached, once cloudflared prints it */
+  tunnelUrl: string | null;
+  tunnelQr: string | null;
+  tunnelError: string | null;
 }
 
 /* ---------------- the preload bridge ---------------- */
@@ -403,7 +409,7 @@ export interface BentomuxApi {
   agentHooksInstall(): Promise<AgentHooksStatus>;
   agentHooksUninstall(): Promise<AgentHooksStatus>;
 
-  /* remote monitor (phone browser) */
+  /* remote control (phone browser, HTTPS via cloudflare tunnel) */
   remoteInfo(): Promise<RemotePairing>;
   remoteSetEnabled(on: boolean): Promise<RemotePairing>;
   remoteSetPort(port: number): Promise<RemotePairing>;
