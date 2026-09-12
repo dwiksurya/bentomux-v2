@@ -1,17 +1,19 @@
-/* ---------------- remote monitor (phone browser) ----------------
-   Rust port of src/main/remote.ts. Optional HTTP + WebSocket server that
-   mirrors pane screens to a phone browser and relays agent approvals.
-   Serves the pairing page (resources/remote-page.html); every route (page
-   and WS) requires the pairing token from prefs.remote.token, embedded in
-   the QR URL shown in Settings. Read-only except approve/deny — no
-   terminal input, so a leaked token cannot type into your shells. Screen
+/* ---------------- remote control (phone browser) ----------------
+   Rust port of src/main/remote.ts. HTTPS-only: the local server binds
+   loopback and is reachable solely through the bundled cloudflared
+   quick tunnel, whose public https://trycloudflare.com URL (token-
+   embedded) is the pairing QR shown in Settings. Every route (page and
+   WS) requires the pairing token from prefs.remote.token — the token
+   now grants FULL CONTROL (watch, switch panes, type into the watched
+   pane, approve/deny), so treat a leaked URL as shell access. Screen
    text comes from the headless render in detect/screen.rs (plain text,
-   escape sequences consumed); watched panes are re-serialized on a fixed
-   tick while their output is moving. Remote decisions go through the same
-   resolve_approval() the local overlay uses, so every surface closes via
-   agent:approvalClosed. */
+   escape sequences consumed); watched panes are re-serialized on a
+   fixed tick while their output is moving. Remote decisions go through
+   the same resolve_approval() the local overlay uses, so every surface
+   closes via agent:approvalClosed. */
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -25,7 +27,7 @@ use futures_util::stream::SplitSink;
 use futures_util::SinkExt;
 use serde::Serialize;
 use serde_json::json;
-use tauri::Manager;
+use tauri::{path::BaseDirectory, Manager};
 
 use crate::state::{AppStateManager, RemotePrefs};
 
@@ -57,6 +59,9 @@ pub struct RemotePairing {
     pub urls: Vec<String>,
     pub qr: Option<String>,
     pub error: Option<String>,
+    pub tunnel_url: Option<String>,
+    pub tunnel_qr: Option<String>,
+    pub tunnel_error: Option<String>,
 }
 
 /* ---------------- outbound message to phone clients ---------------- */
@@ -65,7 +70,7 @@ pub struct RemotePairing {
 enum RemoteMsg {
     /* already-serialized JSON: hello / panes / status / approval / approvalClosed */
     Json(String),
-    View { pane_id: String, text: String },
+    View { pane_id: String, text: String, html: String },
     Gone { pane_id: String },
 }
 
@@ -174,9 +179,9 @@ const PAGE_FALLBACK: &str = "<!doctype html><meta charset=utf-8><title>Bentomux 
 
 fn remote_page_html(app: &tauri::AppHandle) -> String {
     app.path()
-        .resource_dir()
+        .resolve("../resources/remote-page.html", BaseDirectory::Resource)
         .ok()
-        .and_then(|d| std::fs::read_to_string(d.join("remote-page.html")).ok())
+        .and_then(|p| std::fs::read_to_string(p).ok())
         .unwrap_or_else(|| PAGE_FALLBACK.to_string())
 }
 
@@ -189,11 +194,31 @@ struct WsCtx {
     app: tauri::AppHandle,
 }
 
+fn valid_token(params: &HashMap<String, String>, expected: &str) -> bool {
+    params.get("t").map(String::as_str) == Some(expected)
+}
+
+#[cfg(test)]
+mod ws_auth_regression {
+    use super::*;
+
+    #[test]
+    fn rejects_missing_and_wrong_tokens() {
+        assert!(!valid_token(&HashMap::new(), "secret-tok"));
+        assert!(!valid_token(&HashMap::from([(String::from("t"), String::from("wrong"))]), "secret-tok"));
+    }
+
+    #[test]
+    fn accepts_correct_token() {
+        assert!(valid_token(&HashMap::from([(String::from("t"), String::from("secret-tok"))]), "secret-tok"));
+    }
+}
+
 async fn handle_page(
     AxState(st): AxState<WsCtx>,
     axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
-    if params.get("t").map(String::as_str) != Some(st.token.as_str()) {
+    if !valid_token(&params, st.token.as_str()) {
         return (axum::http::StatusCode::UNAUTHORIZED, "Bentomux remote: open the pairing URL shown in Settings → Remote.".to_string()).into_response();
     }
     (
@@ -204,8 +229,15 @@ async fn handle_page(
         .into_response()
 }
 
-async fn handle_ws(ws: WebSocketUpgrade, AxState(st): AxState<WsCtx>) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| client_loop(socket, st))
+async fn handle_ws(
+    ws: WebSocketUpgrade,
+    AxState(st): AxState<WsCtx>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    if !valid_token(&params, st.token.as_str()) {
+        return (axum::http::StatusCode::UNAUTHORIZED, "invalid token").into_response();
+    }
+    ws.on_upgrade(move |socket| client_loop(socket, st)).into_response()
 }
 
 async fn send_json(sender: &mut SplitSink<WebSocket, Message>, body: String) -> bool {
@@ -232,16 +264,16 @@ async fn client_loop(ws: WebSocket, st: WsCtx) {
                 let Some(incoming) = inbound else { break };
                 let msg = match incoming { Ok(m) => m, Err(_) => break };
                 match msg {
-                    Message::Text(text) => handle_incoming(text, &pane_id, &mut sender).await,
+                    Message::Text(text) => handle_incoming(text, &pane_id, &mut sender, &st.app).await,
                     Message::Close(_) => break,
                     _ => {}
                 }
             }
             out = out_rx.recv() => {
                 match out {
-                    Ok(RemoteMsg::View { pane_id: p, text }) => {
+                    Ok(RemoteMsg::View { pane_id: p, text, html }) => {
                         if pane_id.lock().unwrap().as_deref() == Some(p.as_str()) {
-                            if !send_json(&mut sender, js(&json!({"t": "view", "paneId": p, "text": text}))).await { break; }
+                            if !send_json(&mut sender, js(&json!({"t": "view", "paneId": p, "text": text, "html": html}))).await { break; }
                         }
                     }
                     Ok(RemoteMsg::Gone { pane_id: p }) => {
@@ -261,11 +293,13 @@ async fn client_loop(ws: WebSocket, st: WsCtx) {
     }
 }
 
-/* strict wire messages from the phone; anything malformed is ignored */
+/* strict wire messages from the phone; anything malformed is ignored.
+   "write" is full control — it types into the watched pane. */
 async fn handle_incoming(
     text: String,
     pane_id: &Arc<Mutex<Option<String>>>,
     sender: &mut SplitSink<WebSocket, Message>,
+    app: &tauri::AppHandle,
 ) {
     let parsed: serde_json::Value = match serde_json::from_str(&text) {
         Ok(v) => v,
@@ -276,13 +310,21 @@ async fn handle_incoming(
         Some("watch") => {
             if let Some(pid) = m.get("paneId").and_then(|v| v.as_str()) {
                 *pane_id.lock().unwrap() = Some(pid.to_string());
+                let html = crate::detect::screen::screen_dump_html(pid);
                 let text = crate::detect::screen::screen_dump(pid);
-                let body = js(&json!({"t": "view", "paneId": pid, "text": text}));
+                let body = js(&json!({"t": "view", "paneId": pid, "text": text, "html": html}));
                 let _ = sender.send(Message::Text(body)).await;
             }
         }
         Some("unwatch") => {
             *pane_id.lock().unwrap() = None;
+        }
+        Some("write") => {
+            let pid = m.get("paneId").and_then(|v| v.as_str());
+            let data = m.get("data").and_then(|v| v.as_str());
+            if let Some((pid, data)) = valid_write(pid, data) {
+                let _ = app.state::<crate::pty::PtyManager>().write_term(pid, data);
+            }
         }
         Some("approve") => {
             let rid = m.get("requestId").and_then(|v| v.as_str()).map(String::from);
@@ -295,6 +337,39 @@ async fn handle_incoming(
     }
 }
 
+/* a write is only delivered when the pane is live and the payload isn't
+   empty — validated against the live pane set at call time */
+fn valid_write<'a>(
+    pane_id: Option<&'a str>,
+    data: Option<&'a str>,
+) -> Option<(&'a str, &'a str)> {
+    let pid = pane_id?;
+    let data = data?;
+    if data.is_empty() {
+        return None;
+    }
+    Some((pid, data))
+}
+
+#[cfg(test)]
+mod write_validation {
+    use super::*;
+
+    #[test]
+    fn rejects_missing_or_empty_write() {
+        assert!(valid_write(None, Some("ls")).is_none());
+        assert!(valid_write(Some("t-1"), None).is_none());
+        assert!(valid_write(Some("t-1"), Some("")).is_none());
+    }
+
+    #[test]
+    fn accepts_nonempty_write() {
+        let (pid, data) = valid_write(Some("t-1"), Some("ls -la\r")).expect("valid");
+        assert_eq!(pid, "t-1");
+        assert_eq!(data, "ls -la\r");
+    }
+}
+
 /* ---------------- feeds (pty ticks, approvals, runtime status) ---------------- */
 
 fn broadcast(msg: RemoteMsg) {
@@ -304,7 +379,8 @@ fn broadcast(msg: RemoteMsg) {
 }
 
 fn broadcast_view(pane_id: &str, text: &str) {
-    broadcast(RemoteMsg::View { pane_id: pane_id.to_string(), text: text.to_string() });
+    let html = crate::detect::screen::screen_dump_html(pane_id);
+    broadcast(RemoteMsg::View { pane_id: pane_id.to_string(), text: text.to_string(), html });
 }
 
 /* serialize each watched, recently-active pane once per tick */
@@ -342,8 +418,10 @@ pub fn start_remote(app: &tauri::AppHandle, state: &AppStateManager) {
     let port = remote_port(&state.get_state().prefs);
 
     /* bind synchronously so EADDRINUSE surfaces immediately (like the TS
-       listen callback that records lastError before resolving) */
-    let listener = match std::net::TcpListener::bind(("0.0.0.0", port)) {
+       listen callback that records lastError before resolving). Loopback
+       only: the phone path is the cloudflared tunnel, so plain-HTTP LAN
+       access is unreachable by construction. */
+    let listener = match std::net::TcpListener::bind(("127.0.0.1", port)) {
         Ok(l) => l,
         Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
             *last_error().lock().unwrap() = Some(format!("Port {port} is already in use"));
@@ -354,6 +432,15 @@ pub fn start_remote(app: &tauri::AppHandle, state: &AppStateManager) {
             return;
         }
     };
+    /* tokio::net::TcpListener::from_std needs an entered Tokio reactor
+       (tokio-rs/tokio#7172) and a live one to register with — this runs
+       synchronously on the Tauri command thread, outside the async
+       runtime, so enter Tauri's managed runtime handle first. */
+    let _guard = tauri::async_runtime::handle().inner().enter();
+    if let Err(e) = listener.set_nonblocking(true) {
+        *last_error().lock().unwrap() = Some(e.to_string());
+        return;
+    }
     let tokio_listener = match tokio::net::TcpListener::from_std(listener) {
         Ok(l) => l,
         Err(e) => {
@@ -441,18 +528,181 @@ pub fn stop_remote() {
     *current_out().lock().unwrap() = None;
 }
 
-/* ---------------- settings surface ---------------- */
+// ---------------- cloudflare quick tunnel (public HTTPS) ----------------
+// Spawns `cloudflared tunnel --url http://127.0.0.1:<port>` and scrapes
+// the assigned https:// trycloudflare.com URL from its stderr. Gives
+// phones a real CA-signed cert with zero local trust setup, at the cost
+// of routing traffic through Cloudflare's edge instead of staying on
+// LAN — the pairing token is still required on every request, so a
+// leaked tunnel URL alone can't reach anything.
 
-fn local_urls(port: u16, token: &str) -> Vec<String> {
-    let mut urls = Vec::new();
-    if let Ok(list) = local_ip_address::list_afinet_netifas() {
-        for (_name, ip) in list {
-            if ip.is_ipv4() && !ip.is_loopback() {
-                urls.push(format!("http://{ip}:{port}/?t={token}"));
-            }
+struct TunnelState {
+    child: std::process::Child,
+    url: Arc<Mutex<Option<String>>>,
+}
+
+static TUNNEL: std::sync::OnceLock<Mutex<Option<TunnelState>>> = std::sync::OnceLock::new();
+fn tunnel() -> &'static Mutex<Option<TunnelState>> {
+    TUNNEL.get_or_init(|| Mutex::new(None))
+}
+
+static TUNNEL_ERROR: std::sync::OnceLock<Mutex<Option<String>>> = std::sync::OnceLock::new();
+fn tunnel_error() -> &'static Mutex<Option<String>> {
+    TUNNEL_ERROR.get_or_init(|| Mutex::new(None))
+}
+
+pub fn tunnel_url() -> Option<String> {
+    tunnel().lock().unwrap().as_ref().and_then(|t| t.url.lock().unwrap().clone())
+}
+
+pub fn tunnel_running() -> bool {
+    tunnel().lock().unwrap().is_some()
+}
+
+/* scrapes a `https://...trycloudflare.com` URL out of a cloudflared log line */
+fn parse_tunnel_url(line: &str) -> Option<String> {
+    let start = line.find("https://")?;
+    let rest = &line[start..];
+    let end = rest.find(|c: char| c.is_whitespace() || c == '|').unwrap_or(rest.len());
+    let url = &rest[..end];
+    url.contains(".trycloudflare.com").then(|| url.to_string())
+}
+
+fn cloudflared_target() -> Option<&'static str> {
+    if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
+        Some("darwin-x86_64")
+    } else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        Some("darwin-aarch64")
+    } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        Some("linux-x86_64")
+    } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
+        Some("linux-aarch64")
+    } else if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
+        Some("windows-x86_64")
+    } else {
+        None
+    }
+}
+
+fn cloudflared_resource_path(resource_dir: &Path, target: &str, windows: bool) -> std::path::PathBuf {
+    resource_dir.join("cloudflared").join(target).join(if windows { "cloudflared.exe" } else { "cloudflared" })
+}
+
+fn bundled_cloudflared(app: &tauri::AppHandle) -> Option<String> {
+    let target = cloudflared_target()?;
+    let is_win = cfg!(target_os = "windows");
+    if let Ok(dir) = app.path().resource_dir() {
+        let p = cloudflared_resource_path(&dir, target, is_win);
+        if p.is_file() {
+            return Some(p.to_string_lossy().into_owned());
         }
     }
-    urls
+    // dev fallback: during `tauri dev` resourceDir is the temp bundle dir,
+    // so also try the repo layout relative to the executable / cwd
+    for base in [
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../resources"),
+        std::env::current_dir().unwrap_or_default().join("resources"),
+    ] {
+        let p = cloudflared_resource_path(&base, target, is_win);
+        if p.is_file() {
+            return Some(p.to_string_lossy().into_owned());
+        }
+    }
+    None
+}
+
+pub fn start_tunnel(app: &tauri::AppHandle, port: u16) {
+    if tunnel_running() {
+        return;
+    }
+    let bin = bundled_cloudflared(app).or_else(|| crate::shell::find_on_path("cloudflared"));
+    let Some(bin) = bin else {
+        *tunnel_error().lock().unwrap() = Some("cloudflared is not bundled for this platform and was not found on PATH. Install it from https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/ to enable public HTTPS.".to_string());
+        return;
+    };
+    let mut child = match std::process::Command::new(&bin)
+        .args(["tunnel", "--url", &format!("http://127.0.0.1:{port}")])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            *tunnel_error().lock().unwrap() = Some(format!("failed to start cloudflared: {e}"));
+            return;
+        }
+    };
+    *tunnel_error().lock().unwrap() = None;
+    let url: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let stderr = child.stderr.take();
+    let stdout = child.stdout.take();
+    let url2 = url.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        use std::io::BufRead;
+        // watch both streams; cloudflared prints the URL to stderr on most
+        // builds but some wrappers use stdout — check both
+        let mut readers: Vec<Box<dyn BufRead + Send>> = Vec::new();
+        if let Some(s) = stderr { readers.push(Box::new(std::io::BufReader::new(s))); }
+        if let Some(s) = stdout { readers.push(Box::new(std::io::BufReader::new(s))); }
+        for mut r in readers {
+            // drain in a nested loop so the first stream doesn't block forever
+            // on a dead child; each reader runs to EOF independently
+            for line in (&mut r).lines().map_while(Result::ok) {
+                if let Some(u) = parse_tunnel_url(&line) {
+                    let mut cur = url2.lock().unwrap();
+                    if cur.is_none() { *cur = Some(u); }
+                }
+            }
+        }
+        // if the child exited before printing a URL, surface an error so
+        // the panel doesn't stay stuck on "Starting..."
+        if url2.lock().unwrap().is_none() {
+            let mut err = tunnel_error().lock().unwrap();
+            if err.is_none() {
+                *err = Some("cloudflared exited without printing a tunnel URL — check network access or try again.".to_string());
+            }
+        }
+    });
+    *tunnel().lock().unwrap() = Some(TunnelState { child, url });
+}
+
+pub fn stop_tunnel() {
+    let st = tunnel().lock().unwrap().take();
+    let Some(mut st) = st else { return };
+    let _ = st.child.kill();
+    let _ = st.child.wait();
+}
+
+
+/* ---------------- settings surface ---------------- */
+
+/* the single pairing URL: the tunnel URL with the token attached; None
+   while cloudflared hasn't printed its URL yet (or isn't running) */
+fn pairing_url(tunnel: Option<String>, token: &str) -> Vec<String> {
+    tunnel.map(|u| vec![format!("{u}/?t={token}")]).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod pairing_url_tests {
+    use super::*;
+
+    #[test]
+    fn embeds_token_on_tunnel_url() {
+        let urls = pairing_url(
+            Some("https://logan-section-yorkshire-petite.trycloudflare.com".into()),
+            "tok",
+        );
+        assert_eq!(
+            urls,
+            vec!["https://logan-section-yorkshire-petite.trycloudflare.com/?t=tok".to_string()]
+        );
+    }
+
+    #[test]
+    fn empty_while_tunnel_pending() {
+        assert!(pairing_url(None, "tok").is_empty());
+    }
 }
 
 fn qr_svg(url: &str) -> Option<String> {
@@ -469,9 +719,10 @@ pub fn pairing_info(state: &AppStateManager) -> RemotePairing {
     let prefs = state.get_state().prefs;
     let port = remote_port(&prefs);
     let token = prefs.remote.as_ref().and_then(|r| r.token.clone()).unwrap_or_default();
-    let urls = local_urls(port, &token);
-    let qr = if urls.is_empty() { None } else { qr_svg(&urls[0]) };
-    let error = last_error().lock().unwrap().clone();
+    let base = tunnel_url();
+    let paired = base.clone().map(|u| format!("{u}/?t={token}"));
+    let urls = pairing_url(base, &token);
+    let qr = urls.first().and_then(|u| qr_svg(u));
     RemotePairing {
         enabled: remote_enabled(&prefs),
         running: remote_running(),
@@ -479,7 +730,10 @@ pub fn pairing_info(state: &AppStateManager) -> RemotePairing {
         token,
         urls,
         qr,
-        error,
+        error: last_error().lock().unwrap().clone(),
+        tunnel_url: paired.clone(),
+        tunnel_qr: paired.as_deref().and_then(qr_svg),
+        tunnel_error: tunnel_error().lock().unwrap().clone(),
     }
 }
 
@@ -494,10 +748,32 @@ pub fn set_remote_enabled(app: &tauri::AppHandle, state: &AppStateManager, on: b
     });
     if on {
         start_remote(app, state);
+        /* HTTPS is the only access path — the tunnel always follows the
+           local server */
+        if remote_running() {
+            start_tunnel(app, remote_port(&state.get_state().prefs));
+        }
     } else {
+        stop_tunnel();
         stop_remote();
     }
     pairing_info(state)
+}
+
+/* boot-time restore: Electron's index.ts calls startRemote() when
+   prefs.remote.enabled was persisted true from a prior session. The
+   Tauri setup hook has no equivalent — without this, `enabled` shows
+   "On" from disk while the server/tunnel never actually starts, so the
+   panel is stuck on "Starting..." until the user manually flips it. */
+pub fn restore_on_startup(app: &tauri::AppHandle, state: &AppStateManager) {
+    let prefs = state.get_state().prefs;
+    if !remote_enabled(&prefs) {
+        return;
+    }
+    start_remote(app, state);
+    if remote_running() {
+        start_tunnel(app, remote_port(&state.get_state().prefs));
+    }
 }
 
 pub fn set_remote_port(app: &tauri::AppHandle, state: &AppStateManager, port: u16) -> RemotePairing {
@@ -510,8 +786,12 @@ pub fn set_remote_port(app: &tauri::AppHandle, state: &AppStateManager, port: u1
         r.port = Some(port);
     });
     if remote_running() {
+        let had_tunnel = tunnel_running();
         stop_remote();
         start_remote(app, state);
+        if had_tunnel && remote_running() {
+            start_tunnel(app, port);
+        }
     }
     pairing_info(state)
 }
@@ -532,13 +812,6 @@ mod tests {
     }
 
     #[test]
-    fn local_urls_uses_ipv4_non_loopback() {
-        let urls = local_urls(8765, "tok");
-        assert!(!urls.is_empty());
-        assert!(urls.iter().all(|u| u.contains(":8765/") && u.ends_with("t=tok") && !u.contains("127.0.0.1")));
-    }
-
-    #[test]
     fn remote_pane_info_serializes_camel_case() {
         let p = RemotePaneInfo {
             id: "t-1".into(),
@@ -552,4 +825,51 @@ mod tests {
         assert!(s.contains("\"state\":\"working\""));
         assert!(!s.contains('_'));
     }
+    #[test]
+    fn bundled_resource_path_uses_platform_binary_name() {
+        let root = Path::new("/resources");
+        assert_eq!(cloudflared_resource_path(root, "darwin-x86_64", false), Path::new("/resources/cloudflared/darwin-x86_64/cloudflared"));
+        assert_eq!(cloudflared_resource_path(root, "windows-x86_64", true), Path::new("/resources/cloudflared/windows-x86_64/cloudflared.exe"));
+    }
 }
+
+#[cfg(test)]
+mod smoke_socket_conversion {
+    /* regression for the fix above: reproduces the exact bind ->
+       set_nonblocking -> from_std sequence start_remote runs, outside
+       any tokio::main/#[tokio::test] context (mirrors running on the
+       Tauri sync-command thread). Panics pre-fix with either
+       "Registering a blocking socket..." or "there is no reactor
+       running...". */
+    #[test]
+    fn tcp_listener_converts_without_reactor_panic() {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let _guard = tauri::async_runtime::handle().inner().enter();
+        listener.set_nonblocking(true).unwrap();
+        let _tokio_listener = tokio::net::TcpListener::from_std(listener).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod smoke_tunnel {
+    use super::*;
+
+    /* end-to-end proof of the parsing + URL-building logic without
+       actually spawning cloudflared: a fixed cloudflared log line goes
+       in, the exact URL start_tunnel would capture comes out. */
+    #[test]
+    fn parses_trycloudflare_url_from_log_line() {
+        let line = "2026-09-11T02:30:21Z INF |  https://logan-section-yorkshire-petite.trycloudflare.com                                  |";
+        let url = parse_tunnel_url(line).expect("should find url");
+        assert_eq!(url, "https://logan-section-yorkshire-petite.trycloudflare.com");
+    }
+
+    #[test]
+    fn ignores_non_tunnel_urls_in_log_lines() {
+        let line = "2026-09-11T02:30:03Z INF Requesting new quick Tunnel on trycloudflare.com...";
+        assert!(parse_tunnel_url(line).is_none());
+        let line2 = "See https://developers.cloudflare.com/cloudflare-one/ for docs";
+        assert!(parse_tunnel_url(line2).is_none());
+    }
+}
+

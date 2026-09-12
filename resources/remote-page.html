@@ -47,14 +47,30 @@
   .scol{display:flex;flex-direction:column;gap:2px;min-width:0}
   .stitle{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .ssub{color:var(--mut);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  #viewer{position:fixed;inset:0;background:var(--bg);display:flex;flex-direction:column}
+  #viewer{position:fixed;inset:0;z-index:10;background:var(--bg);display:flex;flex-direction:column}
   #viewer[hidden]{display:none}
   .vhead{display:flex;align-items:center;gap:10px;padding:10px 12px;
     border-bottom:1px solid var(--line);background:var(--bg)}
   .vhead button{font-size:20px;line-height:1;padding:4px 10px}
   #vtitle{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  #log{flex:1;margin:0;padding:12px;overflow:auto;white-space:pre-wrap;word-break:break-all;
-    font:12.5px/1.5 ui-monospace,Consolas,monospace}
+  #log{flex:1;margin:0;padding:12px;overflow:auto;
+    white-space:pre;
+    font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    background:#101214;color:#e6e6e6;border-radius:0}
+  #log span{white-space:inherit}
+  #typebar{border-top:1px solid var(--line);background:var(--card);padding:8px 10px 10px;
+    display:flex;flex-direction:column;gap:8px;flex:0 0 auto}
+  .trow{display:flex;gap:8px;align-items:center}
+  .trow input{flex:1;min-width:0;border:1px solid var(--line);border-radius:9px;
+    background:var(--bg);color:var(--ink);padding:10px 12px;font:16px/1.2 -apple-system,system-ui,sans-serif}
+  .trow input:focus{outline:2px solid var(--acc);outline-offset:-1px;border-color:var(--acc)}
+  .tsend{background:var(--acc);color:#fff;min-width:72px;font-weight:600}
+  .tsend:active{background:var(--acc-h)}
+  .tkeys{display:flex;gap:6px;flex-wrap:wrap}
+  .tkeys button{border:1px solid var(--line);background:var(--bg);color:var(--ink);
+    border-radius:8px;padding:7px 10px;font:12px/1 ui-monospace,Consolas,monospace;min-width:0}
+  .tkeys button:active{background:var(--sumbg)}
+  .thint{color:var(--mut);font-size:11px;line-height:1.3}
 </style>
 </head>
 <body>
@@ -72,6 +88,21 @@
     <span id="vtitle"></span>
   </div>
   <pre id="log"></pre>
+  <div id="typebar">
+    <div class="trow">
+      <input id="tinput" placeholder="Type into this pane…" autocomplete="off" spellcheck="false" autocapitalize="off" />
+      <button id="tsend" class="tsend" type="button">Send</button>
+    </div>
+    <div class="tkeys">
+      <button type="button" data-seq="&quot;\u001b&quot;">Esc</button>
+      <button type="button" data-seq="&quot;\u0003&quot;">Ctrl+C</button>
+      <button type="button" data-seq="&quot;\r&quot;">Enter</button>
+      <button type="button" data-seq="&quot;\t&quot;">Tab</button>
+      <button type="button" data-seq="&quot;\u001b[A&quot;">&#8593;</button>
+      <button type="button" data-seq="&quot;\u001b[B&quot;">&#8595;</button>
+    </div>
+    <div class="thint">Your token grants full terminal control — including typing — to anyone with this URL.</div>
+  </div>
 </section>
 <script>
 'use strict';
@@ -150,7 +181,47 @@ function handle(m) {
     if (m.paneId === watching) {
       var log = $('log');
       var wasPinned = pinned;
-      log.textContent = m.text || '';
+      /* backend sends sanitized <span style>-only html mirroring terminal
+         colors; only our own spans exist (cell text is escaped server-side).
+         strip anything else defensively, then fall back to plain text. */
+      if (m.html) {
+        var tmp = document.createElement('div');
+        tmp.innerHTML = m.html;
+        var clean = document.createDocumentFragment();
+        (function walk(src, dst) {
+          for (var n = src.firstChild; n; n = n.nextSibling) {
+            if (n.nodeType === 3) { dst.append(document.createTextNode(n.nodeValue)); }
+            else if (n.nodeName === 'SPAN') {
+              var s = document.createElement('span');
+              var st = n.getAttribute('style') || '';
+              /* allow only color/background/weight/style/decoration props */
+              if (/^[a-z\-;:#(),\s\d.%]+$/i.test(st)
+                && !/url|expression|behavior|binding|javascript/i.test(st)) s.setAttribute('style', st);
+              walk(n, s);
+              dst.append(s);
+            } else if (n.nodeName === 'BR') { dst.append(document.createElement('br')); }
+          }
+        })(tmp, clean);
+        /* newlines are significant: split text nodes on \n into <br> rows */
+        (function breaks(node) {
+          for (var n = node.firstChild; n;) {
+            var next = n.nextSibling;
+            if (n.nodeType === 3 && n.nodeValue.indexOf('\n') >= 0) {
+              var parts = n.nodeValue.split('\n');
+              for (var i = 0; i < parts.length; i++) {
+                if (i) node.insertBefore(document.createElement('br'), n);
+                if (parts[i]) node.insertBefore(document.createTextNode(parts[i]), n);
+              }
+              node.removeChild(n);
+            } else if (n.nodeType === 1) { breaks(n); }
+            n = next;
+          }
+        })(clean);
+        log.textContent = '';
+        log.append(clean);
+      } else {
+        log.textContent = m.text || '';
+      }
       if (wasPinned) log.scrollTop = log.scrollHeight;
     }
   } else if (m.t === 'approval') {
@@ -209,6 +280,11 @@ function decide(requestId, decision) {
   send({ t: 'approve', requestId: requestId, decision: decision });
 }
 
+function sendInput(data) {
+  if (!watching || data == null || data === '') return;
+  send({ t: 'write', paneId: watching, data: data });
+}
+
 function openPane(id) {
   var p = panes.find(function (x) { return x.id === id; });
   watching = id;
@@ -230,6 +306,45 @@ $('log').addEventListener('scroll', function () {
   var log = $('log');
   pinned = log.scrollTop + log.clientHeight >= log.scrollHeight - 32;
 });
+
+/* typing: field + quick keys */
+(function () {
+  var field = $('tinput');
+  var sendBtn = $('tsend');
+
+  function flushText() {
+    var val = field.value;
+    if (!val) return;
+    sendInput(val);
+    field.value = '';
+    field.focus();
+  }
+
+  sendBtn.addEventListener('click', function () {
+    if (field.value) {
+      sendInput(field.value + '\r');
+      field.value = '';
+    }
+    field.focus();
+  });
+  field.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendInput(field.value + '\r');
+      field.value = '';
+    }
+  });
+  var keys = document.querySelectorAll('.tkeys button[data-seq]');
+  for (var i = 0; i < keys.length; i++) {
+    (function (btn) {
+      btn.addEventListener('click', function () {
+        var seq = btn.getAttribute('data-seq');
+        try { seq = JSON.parse(seq); } catch (e) {}
+        sendInput(seq);
+      });
+    })(keys[i]);
+  }
+})();
 
 connect();
 </script>

@@ -5,22 +5,27 @@
   "identifier": "app.bentomux.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
-    "beforeBuildCommand": "npm run build",
+    "beforeBuildCommand": "npm run build && npm run prepare:cloudflared",
     "devUrl": "http://localhost:5173",
     "frontendDist": "../out/renderer"
   },
   "bundle": {
     "active": true,
-    "targets": ["dmg", "app", "nsis", "msi"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "resources": ["../resources/bentomux-hook.cjs", "../resources/remote-page.html"]
+    "resources": [
+      "../resources/bentomux-hook.cjs",
+      "../resources/remote-page.html",
+      "../resources/manifests",
+      "../resources/cloudflared"
+    ]
   },
   "app": {
+    "macOSPrivateApi": true,
     "windows": [
       {
         "label": "main",
@@ -35,6 +40,22 @@
         "titleBarStyle": "Overlay",
         "hiddenTitle": true,
         "fullscreen": false
+      },
+      {
+        "label": "approval-overlay",
+        "title": "Bentomux — approval",
+        "url": "approval.html",
+        "width": 480,
+        "height": 220,
+        "minWidth": 480,
+        "minHeight": 220,
+        "resizable": true,
+        "decorations": false,
+        "transparent": true,
+        "visible": false,
+        "focus": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true
       }
     ],
     "security": {
