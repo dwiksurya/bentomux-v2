@@ -2,12 +2,13 @@
   "name": "bentomux-v2",
   "productName": "Bentomux",
   "version": "0.1.0",
-  "description": "Bentomux — calm desktop for AI agent runtime workspaces (Tauri)",
+  "description": "Bentomux - calm desktop for AI agent runtime workspaces (Tauri)",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "prepare:cloudflared": "node scripts/prepare-cloudflared.mjs",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "tauri": "tauri"
