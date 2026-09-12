@@ -1,23 +1,27 @@
 /* ---------------- agent hook bridge ----------------
-   Rust port of src/main/bridge.ts. Agents configured with Bentomux's
-   managed hooks (agent_hooks.rs) run resources/bentomux-hook.cjs on
-   PermissionRequest. The CLI forwards the payload here over a unix socket,
-   one JSON line per connection. PermissionRequest connections stay open
-   until the user decides in the renderer; the directive JSON then goes
-   back on the same socket so the agent itself executes the decision — no
-   keystroke synthesis. Everything fails open: a dead bridge just means
-   the agent falls back to its native prompt. */
+   Rust port of src/main/bridge.ts. Agents configured with Bentomux's managed
+   hooks (agent_hooks.rs) run resources/bentomux-hook.cjs on PermissionRequest.
+   The CLI forwards the payload over a Unix socket or Windows named pipe, one
+   JSON line per connection. PermissionRequest connections stay open until the
+   user decides in the renderer; the directive JSON then goes back on the same
+   connection so the agent itself executes the decision — no keystroke
+   synthesis. Everything fails open: a dead bridge means the agent falls back
+   to its native prompt. */
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
+#[cfg(test)]
+use std::io::Read;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
 
 use serde::Serialize;
 use tauri::{Emitter, Manager};
 
 use crate::bridge_config::bridge_address;
 use crate::pty::PtyManager;
+
+
 
 /* the renderer-facing approval request (shared/types AgentApprovalRequest) */
 #[derive(Serialize, Clone, Debug)]
@@ -47,7 +51,7 @@ pub struct AgentEventNotice {
 
 struct Pending {
     req: AgentApprovalRequest,
-    conn: std::os::unix::net::UnixStream,
+    response: mpsc::Sender<Option<String>>,
 }
 
 struct HookReg {
@@ -113,6 +117,11 @@ pub fn on_approval_closed(cb: impl Fn(&str) + Send + Sync + 'static) {
 pub fn pending_approvals() -> Vec<AgentApprovalRequest> {
     bridge_state().lock().unwrap().pending.values().map(|p| p.req.clone()).collect()
 }
+/* Replay the request when a newly-created overlay missed the initial event
+   while its WebView was still loading. */
+pub fn pending_approval() -> Option<AgentApprovalRequest> {
+    bridge_state().lock().unwrap().pending.values().next().map(|p| p.req.clone())
+}
 
 /* ---------- helpers ---------- */
 
@@ -159,10 +168,9 @@ pub fn emit_agent_event(notice: &AgentEventNotice) {
 
 pub fn close_pending(request_id: &str) {
     let mut st = bridge_state().lock().unwrap();
-    if st.pending.remove(request_id).is_none() {
-        return;
-    }
+    let Some(pending) = st.pending.remove(request_id) else { return };
     let hooks = st.hooks.closed.clone();
+    let _ = pending.response.send(None);
     drop(st);
     emit("agent:approvalClosed", &request_id);
     for cb in &hooks {
@@ -186,11 +194,10 @@ pub fn drop_pane(pane_id: &str) {
 
 pub fn resolve_approval(request_id: &str, decision: bool) -> bool {
     let mut st = bridge_state().lock().unwrap();
-    let Some(mut p) = st.pending.remove(request_id) else { return false };
+    let Some(pending) = st.pending.remove(request_id) else { return false };
     let hooks = st.hooks.closed.clone();
+    let _ = pending.response.send(Some(directive(decision) + "\n"));
     drop(st);
-    let _ = p.conn.write_all((directive(decision) + "\n").as_bytes());
-    let _ = p.conn.shutdown(std::net::Shutdown::Write); /* EOF closes the hook */
     emit("agent:approvalClosed", &request_id);
     for cb in &hooks {
         cb(request_id);
@@ -296,19 +303,30 @@ fn parse_envelope(raw: &str) -> Option<(String, Option<String>, serde_json::Valu
     Some((event, pane, payload))
 }
 
-fn dispatch(conn: std::os::unix::net::UnixStream, line: &str) {
-    let Some((event, pane, payload)) = parse_envelope(line) else {
-        let _ = conn.shutdown(std::net::Shutdown::Both);
-        return;
-    };
-    if event != "PermissionRequest" {
-        let _ = conn.shutdown(std::net::Shutdown::Both); /* non-blocking events answer nothing */
-        return;
+fn dispatch(line: &str, response: mpsc::Sender<Option<String>>) -> bool {
+    if let Ok(obj) = serde_json::from_str::<serde_json::Value>(line) {
+        if obj.get("method").and_then(|v| v.as_str()) == Some("pane.report_agent") {
+            let params = obj.get("params").and_then(|v| v.as_object());
+            let pane = params.and_then(|p| p.get("pane_id")).and_then(|v| v.as_str());
+            let agent = params.and_then(|p| p.get("agent")).and_then(|v| v.as_str());
+            let state = params.and_then(|p| p.get("state")).and_then(|v| v.as_str());
+            if let (Some(pane), Some(agent), Some(state)) = (pane, agent, state) {
+                let message = params.and_then(|p| p.get("message")).and_then(|v| v.as_str()).map(str::to_string);
+                crate::runtime::report_agent_state(pane, agent, state, message);
+                let _ = response.send(Some("{}\n".to_string()));
+                return true;
+            }
+        }
+        if obj.get("method").and_then(|v| v.as_str()) == Some("pane.report_agent_session") {
+            let _ = response.send(Some("{}\n".to_string()));
+            return true;
+        }
     }
-    let Some(tool_name) = str_field(&payload, "tool_name") else {
-        let _ = conn.shutdown(std::net::Shutdown::Both);
-        return;
-    };
+    let Some((event, pane, payload)) = parse_envelope(line) else { return false };
+    if event != "PermissionRequest" {
+        return false;
+    }
+    let Some(tool_name) = str_field(&payload, "tool_name") else { return false };
     let input = payload.get("tool_input").filter(|v| v.is_object()).cloned().unwrap_or(serde_json::json!({}));
     let req = AgentApprovalRequest {
         request_id: request_id(),
@@ -322,31 +340,47 @@ fn dispatch(conn: std::os::unix::net::UnixStream, line: &str) {
     let rid = req.request_id.clone();
     {
         let mut st = bridge_state().lock().unwrap();
-        st.pending.insert(rid.clone(), Pending { req: req.clone(), conn });
+        st.pending.insert(rid, Pending { req: req.clone(), response });
         let created = st.hooks.created.clone();
         drop(st);
+        for cb in &created { cb(&req); }
+        /* Create/show the overlay before emitting the request. A newly-created
+           WebView cannot receive events emitted before its page subscribes. */
+        desktop_notify(&req);
         emit("agent:approval", &req);
-        for cb in &created {
-            cb(&req);
-        }
     }
-    desktop_notify(&req);
-    /* socket stays open — resolve writes the directive, or the process dies */
+    true
 }
 
-/* the hook sends a single newline-terminated envelope per connection.
-   Read it off a clone of the fd so `stream` can be moved into `pending`
-   (PermissionRequest) without losing the read half; non-blocking events
-   are answered with an immediate close. */
-fn handle_connection(stream: std::os::unix::net::UnixStream) {
+#[cfg(unix)]
+fn handle_connection(mut stream: std::os::unix::net::UnixStream) {
     let Ok(read) = stream.try_clone() else { return };
     let mut reader = BufReader::new(read);
     let mut line = String::new();
-    if reader.read_line(&mut line).unwrap_or(0) == 0 {
-        return; /* EOF before any payload */
+    if reader.read_line(&mut line).unwrap_or(0) == 0 { return; }
+    let (response_tx, response_rx) = mpsc::channel();
+    if !dispatch(line.trim(), response_tx) { return; }
+    if let Ok(Some(response)) = response_rx.recv() {
+        let _ = stream.write_all(response.as_bytes());
     }
-    dispatch(stream, line.trim());
+    let _ = stream.shutdown(std::net::Shutdown::Both);
 }
+
+#[cfg(windows)]
+async fn handle_connection(mut stream: tokio::net::windows::named_pipe::NamedPipeServer) {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+    let mut reader = tokio::io::BufReader::new(stream);
+    let mut line = String::new();
+    if reader.read_line(&mut line).await.unwrap_or(0) == 0 { return; }
+    stream = reader.into_inner();
+    let (response_tx, response_rx) = mpsc::channel();
+    if !dispatch(line.trim(), response_tx) { return; }
+    let response = tokio::task::spawn_blocking(move || response_rx.recv()).await.ok().and_then(Result::ok);
+    if let Some(Some(response)) = response {
+        let _ = stream.write_all(response.as_bytes()).await;
+    }
+}
+
 
 /* ---------- listener lifecycle ---------- */
 
@@ -368,14 +402,17 @@ pub fn start_bridge(app: tauri::AppHandle, pty: &PtyManager) {
             }
             let _ = std::fs::remove_file(&addr); /* stale socket already gone */
         }
-    }
 
+    }
     /* drop pending approvals when the requesting terminal pane exits */
     let mut exit_rx = pty.on_term_exit();
     std::thread::spawn(move || loop {
         use tokio::sync::broadcast::error::TryRecvError;
         match exit_rx.try_recv() {
-            Ok((pane_id, _)) => drop_pane(&pane_id),
+            Ok((pane_id, _)) => {
+                crate::runtime::clear_reported_agent(&pane_id);
+                drop_pane(&pane_id);
+            }
             Err(TryRecvError::Empty) | Err(TryRecvError::Lagged(_)) => std::thread::sleep(std::time::Duration::from_millis(25)),
             Err(TryRecvError::Closed) => break,
         }
@@ -400,22 +437,61 @@ pub fn start_bridge(app: tauri::AppHandle, pty: &PtyManager) {
     });
 }
 
-#[cfg(not(unix))]
-pub fn start_bridge(_app: tauri::AppHandle, _pty: &PtyManager) {
-    /* named-pipe listener is a Windows-only follow-up (bridge-config addresses
-       \\.\pipe\bentomux-bridge); not built on non-unix today */
+#[cfg(windows)]
+pub fn start_bridge(app: tauri::AppHandle, pty: &PtyManager) {
+    bridge_state().lock().unwrap().app = Some(app);
+    let addr = bridge_address();
+    let mut exit_rx = pty.on_term_exit();
+    std::thread::spawn(move || loop {
+        use tokio::sync::broadcast::error::TryRecvError;
+        match exit_rx.try_recv() {
+            Ok((pane_id, _)) => drop_pane(&pane_id),
+            Err(TryRecvError::Empty) | Err(TryRecvError::Lagged(_)) => std::thread::sleep(std::time::Duration::from_millis(25)),
+            Err(TryRecvError::Closed) => break,
+        }
+    });
+    std::thread::spawn(move || {
+        let runtime = match tokio::runtime::Runtime::new() {
+            Ok(runtime) => runtime,
+            Err(error) => { eprintln!("[bentomux] bridge runtime failed: {error}"); return; }
+        };
+        runtime.block_on(async move {
+            use tokio::net::windows::named_pipe::ServerOptions;
+            loop {
+                let server = match ServerOptions::new().create(&addr) {
+                    Ok(server) => server,
+                    Err(error) => { eprintln!("[bentomux] bridge pipe bind failed on {addr}: {error}"); return; }
+                };
+                if let Err(error) = server.connect().await {
+                    eprintln!("[bentomux] bridge pipe accept error: {error}");
+                    continue;
+                }
+                tokio::spawn(handle_connection(server));
+            }
+        });
+    });
 }
+
+#[cfg(not(any(unix, windows)))]
+pub fn start_bridge(_app: tauri::AppHandle, _pty: &PtyManager) {}
 
 pub fn stop_bridge() {
     let mut st = bridge_state().lock().unwrap();
-    for (_, p) in st.pending.drain() {
-        let _ = p.conn.shutdown(std::net::Shutdown::Both);
+    for (_, pending) in st.pending.drain() {
+        let _ = pending.response.send(None);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::sync::LazyLock;
+    static TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    fn test_lock() -> std::sync::MutexGuard<'static, ()> {
+        TEST_LOCK.lock().unwrap()
+    }
 
     #[test]
     fn base36_roundtrip() {
@@ -453,6 +529,18 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_accepts_reported_agent_state() {
+        let (tx, rx) = mpsc::channel();
+        assert!(dispatch(
+            r#"{"method":"pane.report_agent","params":{"pane_id":"pane-omp","agent":"omp","state":"working"}}"#,
+            tx,
+        ));
+        assert_eq!(rx.recv().unwrap().unwrap(), "{}\n");
+        assert!(crate::runtime::has_reported_agent("pane-omp"));
+        crate::runtime::clear_reported_agent("pane-omp");
+    }
+
+    #[test]
     fn request_id_has_ar_prefix() {
         let a = request_id();
         let b = request_id();
@@ -466,4 +554,46 @@ mod tests {
         assert_eq!(str_field(&serde_json::json!({"a":""}), "a"), None);
         assert_eq!(str_field(&serde_json::json!({"a":5}), "a"), None);
     }
+
+    #[test]
+    fn dispatch_and_resolve_round_trip_uses_response_channel() {
+        let _guard = test_lock();
+        stop_bridge();
+        let (tx, rx) = mpsc::channel();
+        assert!(dispatch(
+            r#"{"v":1,"event":"PermissionRequest","pane":"pane-1","payload":{"tool_name":"Bash","tool_input":{"command":"echo ok"}}}"#,
+            tx,
+        ));
+        let pending = pending_approvals();
+        assert_eq!(pending.len(), 1);
+        let request_id = pending[0].request_id.clone();
+        assert!(resolve_approval(&request_id, true));
+        let response = rx.recv().unwrap().unwrap();
+        let json: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(json["hookSpecificOutput"]["decision"]["behavior"], "allow");
+        stop_bridge();
+    }
+    #[cfg(unix)]
+    #[test]
+    fn unix_socket_connection_returns_resolved_directive() {
+        let _guard = test_lock();
+        use std::os::unix::net::UnixStream;
+        use std::time::Duration;
+        stop_bridge();
+        let (server, mut client) = UnixStream::pair().unwrap();
+        std::thread::spawn(|| handle_connection(server));
+        client.write_all(br#"{"v":1,"event":"PermissionRequest","pane":"pane-1","payload":{"tool_name":"Bash","tool_input":{"command":"echo ok"}}}
+"#).unwrap();
+        client.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let request_id = loop {
+            if let Some(request) = pending_approvals().into_iter().next() { break request.request_id; }
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert!(resolve_approval(&request_id, false));
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+        let json: serde_json::Value = serde_json::from_str(response.trim()).unwrap();
+        assert_eq!(json["hookSpecificOutput"]["decision"]["behavior"], "deny");
+    }
+
 }

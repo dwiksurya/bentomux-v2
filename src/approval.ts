@@ -1,3 +1,5 @@
+import { Window } from '@tauri-apps/api/window';
+import './preload/bentomux';
 /* ============================================================
    Bentomux — calm desktop for AI agent runtime workspaces.
    Approval overlay page script (approval.html): the always-on-top pill
@@ -92,7 +94,10 @@ function render(req: {
 
 /* resolved elsewhere (native prompt answered, pane died, another surface) */
 window.bentomux.onAgentApprovalClosed(id => {
-  if (currentRequestId !== null && id === currentRequestId) window.close();
+  if (currentRequestId !== null && id === currentRequestId) {
+    void window.bentomux.hideApproval();
+    window.close();
+  }
 });
 
 /* any request that arrives renders the island; the bridge already filtered
@@ -100,6 +105,11 @@ window.bentomux.onAgentApprovalClosed(id => {
 window.bentomux.onAgentApproval(r => {
   render(r);
 });
+/* A new WebView can miss the event emitted during creation. Replay the
+   still-pending request so the message and request id are always populated. */
+void window.bentomux.approvalPending().then(req => {
+  if (req && currentRequestId === null) render(req);
+}).catch(() => { /* overlay remains usable if the bridge is unavailable */ });
 
 /* apply the persisted theme immediately so the island matches the app */
 window.bentomux.getState()
@@ -110,14 +120,37 @@ window.bentomux.getState()
   .catch(() => { /* prefs read failure is non-fatal */ });
 
 $('#approve').addEventListener('click', () => {
-  if (currentRequestId) window.bentomux.resolveApproval(currentRequestId, 'allow');
-  window.close();
+  if (!currentRequestId) return;
+  void window.bentomux.resolveApproval(currentRequestId, 'allow')
+    .finally(() => { void window.bentomux.hideApproval(); });
 });
 $('#deny').addEventListener('click', () => {
-  if (currentRequestId) window.bentomux.resolveApproval(currentRequestId, 'deny');
-  window.close();
+  if (!currentRequestId) return;
+  void window.bentomux.resolveApproval(currentRequestId, 'deny')
+    .finally(() => { void window.bentomux.hideApproval(); });
 });
 $('#jump').addEventListener('click', () => {
-  if (currentRequestId) window.bentomux.approvalJump(currentPaneId, currentCwd);
-  window.close();
+  if (!currentRequestId) return;
+  void window.bentomux.hideApproval();
+  void window.bentomux.approvalJump(currentPaneId, currentCwd).catch(() => {});
+  void (async () => {
+    const main = new Window('main');
+    const { promise, resolve } = Promise.withResolvers<void>();
+    window.setTimeout(resolve, 30);
+    await promise;
+    await main.setVisibleOnAllWorkspaces(true);
+    await main.show();
+    await main.unminimize();
+    await main.setAlwaysOnTop(true);
+    await main.setFocus();
+    await main.setAlwaysOnTop(false);
+  })().catch(() => {});
+  window.setTimeout(() => {
+    void (async () => {
+      const main = new Window('main');
+      await main.setVisibleOnAllWorkspaces(true);
+      await main.show();
+      await main.setFocus();
+    })().catch(() => {});
+  }, 180);
 });

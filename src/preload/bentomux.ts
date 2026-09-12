@@ -127,18 +127,18 @@ const api = {
     subscribe<string>('agent:approvalClosed', cb),
   onAgentEvent: (cb: (notice: AgentEventNotice) => void) =>
     subscribe<AgentEventNotice>('agent:event', cb),
-  resolveApproval: (requestId: string, decision: 'allow' | 'deny') => {
-    void invoke('agent_approval_resolve', { requestId, decision });
-  },
-  approvalJump: (paneId: string | null, cwd: string | null) => {
-    void invoke('agent_approval_jump', { paneId, cwd });
-  },
+  resolveApproval: (requestId: string, decision: 'allow' | 'deny') =>
+    invoke<boolean>('agent_approval_resolve', { requestId, decision }),
+  approvalPending: () => invoke<AgentApprovalRequest | null>('agent_approval_pending'),
+  hideApproval: () => invoke('agent_approval_hide'),
+  approvalJump: (paneId: string | null, cwd: string | null) =>
+    invoke<void>('agent_approval_jump', { paneId, cwd }),
   setActiveTab: (tabId: string | null) => { void invoke('agent_set_active_tab', { tabId }); },
   agentHooksStatus: () => invoke<AgentHooksStatus>('agent_hooks_status'),
   agentHooksInstall: () => invoke<AgentHooksStatus>('agent_hooks_install'),
   agentHooksUninstall: () => invoke<AgentHooksStatus>('agent_hooks_uninstall'),
 
-  /* remote monitor (phone browser) */
+  /* remote control (phone browser, HTTPS via cloudflare tunnel) */
   remoteInfo: () => invoke<RemotePairing>('remote_info'),
   remoteSetEnabled: (on: boolean) => invoke<RemotePairing>('remote_set_enabled', { on }),
   remoteSetPort: (port: number) => invoke<RemotePairing>('remote_set_port', { port }),
