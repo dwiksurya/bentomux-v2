@@ -33,8 +33,6 @@ function buildSearchItems(): Section[] {
   const navItems: SearchItem[] = [
     { kind: 'nav', id: 'nav:settings', label: 'Settings', sub: 'Theme, palette, terminal font', icon: 'gear',
       onPick: () => openSettingsModal() },
-    { kind: 'nav', id: 'nav:agents', label: 'Agents', sub: 'Open agents page', icon: 'bot',
-      onPick: () => go({ view: 'agents' }) },
   ];
   sections.push({ title: 'Menu', items: navItems });
 
