@@ -238,9 +238,45 @@ async function loadInitialBranches(): Promise<void> {
   }));
 }
 
+let statusAudio: AudioContext | null = null;
+const lastAgentStates: Record<string, string | null | undefined> = {};
+
+async function playAgentStatusSound(kind: 'finished' | 'blocked' | 'idle'): Promise<void> {
+  if (db.prefs.notifEnabled === false || db.prefs.notifSound === false) return;
+  const AudioCtor = window.AudioContext ?? (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+  if (!AudioCtor) return;
+  statusAudio ??= new AudioCtor();
+  await statusAudio.resume();
+  const now = statusAudio.currentTime;
+  const notes = kind === 'blocked' ? [220, 165] : kind === 'finished' ? [660, 880] : [520, 660];
+  for (const [index, frequency] of notes.entries()) {
+    const oscillator = statusAudio.createOscillator();
+    const gain = statusAudio.createGain();
+    const at = now + index * 0.12;
+    oscillator.frequency.value = frequency;
+    gain.gain.setValueAtTime(0.0001, at);
+    gain.gain.exponentialRampToValueAtTime(0.22, at + 0.015);
+    gain.gain.exponentialRampToValueAtTime(0.0001, at + 0.22);
+    oscillator.connect(gain).connect(statusAudio.destination);
+    oscillator.start(at);
+    oscillator.stop(at + 0.24);
+  }
+}
+
+function notifyAgentTransition(id: string, state: string | null | undefined): void {
+  const previous = lastAgentStates[id];
+  lastAgentStates[id] = state;
+  if (previous === undefined || previous === state) return;
+  if (state === 'blocked') void playAgentStatusSound('blocked');
+  else if (previous === 'working' && state === 'idle') void playAgentStatusSound('finished');
+  else if (previous === 'blocked' && state === 'idle') void playAgentStatusSound('idle');
+}
+
+
 function subscribeRuntime(): void {
   window.bentomux.onRuntimeStatus(statuses => {
     for (const [id, st] of Object.entries(statuses)) {
+      notifyAgentTransition(id, st.state);
       runtime[id] = st;
       if (st.running) activity[id] = Date.now();
     }
@@ -260,8 +296,8 @@ function logSmokeIfRequested(): void {
 }
 
 async function boot(): Promise<void> {
+  const bootStart = performance.now();
   setDb(await window.bentomux.getState());
-
   /* live subscriptions before anything renders */
   initTerminalEvents();
   window.bentomux.onBranch((wsId, branch) => {
@@ -295,8 +331,9 @@ async function boot(): Promise<void> {
 
   restoreInitialView(restored);
   logSmokeIfRequested();
-}
+  console.info('[perf] renderer-boot-ms=' + Math.round(performance.now() - bootStart));
 
+}
 boot().catch(e => {
   console.error(e);
   document.body.innerText = 'Bentomux boot error: ' + (e instanceof Error ? e.message : String(e));
