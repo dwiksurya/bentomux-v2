@@ -16,9 +16,16 @@ npm run tauri dev    # Full app: Vite + Rust backend + WebView
 npm run tauri build  # Production bundle (dmg/app/nsis/msi)
 cargo check --manifest-path src-tauri/Cargo.toml
 cargo build --manifest-path src-tauri/Cargo.toml
+
+# Backend unit tests — use this instead of bare `cargo test`:
+npm run test:backend # cargo test --lib + Windows comctl32-v6 manifest for the harness
 ```
 
-No test runner, linter, or formatter is configured. No `test`/`lint` scripts exist.
+No linter or formatter is configured. On Windows a bare `cargo test` links a
+harness that dies at load (STATUS_ENTRYPOINT_NOT_FOUND: the binary imports
+`comctl32!TaskDialogIndirect` via rfd but has no Common-Controls-v6 manifest);
+`npm run test:backend` wraps the working invocation (see
+`src-tauri/build.rs`).
 
 ## Architecture
 

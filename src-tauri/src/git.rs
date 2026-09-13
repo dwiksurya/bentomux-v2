@@ -600,6 +600,10 @@ mod tests {
         run_process(&p, &["init", "-q"], None).expect("git init");
         run_process(&p, &["config", "user.email", "test@bentomux"], None).ok();
         run_process(&p, &["config", "user.name", "test"], None).ok();
+        /* hermetic vs the machine's global config: commit.gpgsign=true makes
+           every commit spawn the agent's pinentry, which blocks headless runs */
+        run_process(&p, &["config", "commit.gpgsign", "false"], None).ok();
+        run_process(&p, &["config", "tag.gpgsign", "false"], None).ok();
         p
     }
 

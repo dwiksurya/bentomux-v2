@@ -368,14 +368,19 @@ mod tests {
         let mut exit_rx = mgr.on_term_exit();
 
         let workspace = ws("spawn");
-        let id = mgr.create_term(&workspace.id, &workspace.path, None).expect("spawn");
+        /* windows: cmd starts instantly and skips user pwsh profiles; unix:
+           the detected default (bash) as before */
+        let shell_pref = if cfg!(windows) { Some("cmd") } else { None };
+        let id = mgr.create_term(&workspace.id, &workspace.path, shell_pref).expect("spawn");
 
         let info = mgr.get_term(&id).expect("term registered");
         assert!(info.alive);
         assert!(info.pid > 0);
 
-        /* echo a marker and expect it back through the pty */
-        mgr.write_term(&id, "echo BENTOMUX_TEST_MARKER\n").expect("write");
+        /* echo a marker and expect it back through the pty. \r submits the
+           line the way a real Enter keystroke does (\n alone does not in
+           cmd/PowerShell); bash tolerates the trailing \r. */
+        mgr.write_term(&id, "echo BENTOMUX_TEST_MARKER\r\n").expect("write");
         let mut saw_marker = false;
         for _ in 0..50 {
             match tokio::time::timeout(std::time::Duration::from_millis(200), data_rx.recv()).await {

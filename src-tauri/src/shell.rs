@@ -83,7 +83,7 @@ fn path_files() -> HashMap<String, PathBuf> {
         for entry in entries.flatten() {
             if let Ok(name) = entry.file_name().into_string() {
                 let key = name.to_lowercase();
-                files.entry(key).or_insert_with(|| dir.join(&name));
+                files.entry(key).or_insert_with(|| PathBuf::from(&dir).join(&name));
             }
         }
     }
@@ -162,8 +162,8 @@ pub fn detect_shell() -> ShellChoice {
 #[cfg(windows)]
 fn detect_shell_uncached() -> ShellChoice {
     for (name, args) in [
-        ("pwsh.exe", vec!["-NoLogo"]),
-        ("powershell.exe", vec!["-NoLogo"]),
+        ("pwsh.exe", vec!["-NoLogo".to_string()]),
+        ("powershell.exe", vec!["-NoLogo".to_string()]),
         ("cmd.exe", vec![]),
     ] {
         if let Some(found) = find_on_path(name) {
@@ -261,9 +261,9 @@ pub fn resolve_shell(pref: Option<&str>) -> ShellChoice {
             Some(found) => ShellChoice { file: found, args: vec![] },
             None => detect_shell(),
         },
-        /* the windows-only picks have no unix equivalent: fall back to the
-           detected default rather than spawning a nonexistent binary */
-        #[cfg(unix)]
+        /* platform-specific picks that don't exist on this OS (or unknown
+           prefs entirely): fall back to the detected default rather than
+           spawning a nonexistent binary */
         Some(_) => detect_shell(),
     }
 }

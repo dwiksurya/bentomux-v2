@@ -9,8 +9,9 @@
    to its native prompt. */
 
 use std::collections::HashMap;
+#[cfg(unix)]
 use std::io::{BufRead, BufReader, Write};
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use std::io::Read;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
@@ -384,6 +385,7 @@ async fn handle_connection(mut stream: tokio::net::windows::named_pipe::NamedPip
 
 /* ---------- listener lifecycle ---------- */
 
+#[cfg(unix)]
 fn live_socket(addr: &str) -> bool {
     std::os::unix::net::UnixStream::connect(addr).is_ok()
 }

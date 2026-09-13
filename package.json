@@ -11,6 +11,7 @@
     "prepare:cloudflared": "node scripts/prepare-cloudflared.mjs",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
+    "test:backend": "node scripts/test-backend.mjs",
     "tauri": "tauri"
   },
   "dependencies": {
