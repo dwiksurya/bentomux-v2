@@ -2,11 +2,14 @@ name: Build
 
 on:
   push:
-    branches: [main]
+    branches: [main, master]
+    tags: ['v*']
   pull_request:
 
 jobs:
   verify:
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -20,6 +23,13 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Sync version from tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          V="${GITHUB_REF_NAME#v}"
+          node -e "const f='src-tauri/tauri.conf.json',fs=require('fs'),j=JSON.parse(fs.readFileSync(f));j.version=process.argv[1];fs.writeFileSync(f,JSON.stringify(j,null,2)+'\n')" "$V"
 
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
@@ -55,3 +65,14 @@ jobs:
             src-tauri/target/release/bundle/**/*.AppImage
             src-tauri/target/release/bundle/**/*.msi
           if-no-files-found: error
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || \
+            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
+          find src-tauri/target/release/bundle -type f \( -name '*.dmg' -o -name '*.AppImage' -o -name '*.msi' \) \
+            -exec gh release upload "$GITHUB_REF_NAME" {} --clobber \;
