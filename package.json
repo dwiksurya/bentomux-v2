@@ -3,6 +3,7 @@
   "productName": "Bentomux",
   "version": "0.1.0",
   "description": "Bentomux - calm desktop for AI agent runtime workspaces (Tauri)",
+  "license": "MIT",
   "private": true,
   "type": "module",
   "scripts": {
