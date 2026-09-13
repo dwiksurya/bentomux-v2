@@ -40,7 +40,7 @@ jobs:
       - run: npm run typecheck
       - run: npm run build
       - run: cargo check --manifest-path src-tauri/Cargo.toml
-      - run: cargo test --manifest-path src-tauri/Cargo.toml
+      - run: npm run test:backend
       - run: npm run tauri -- build
 
       - name: Validate packaged resources and sizes
