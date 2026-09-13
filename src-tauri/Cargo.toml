@@ -3,6 +3,8 @@ name = "bentomux"
 version = "0.1.0"
 edition = "2021"
 description = "Bentomux — calm desktop for AI agent runtime workspaces"
+license = "MIT"
+repository = "https://github.com/dwiksurya/bentomux-v2"
 
 [lib]
 name = "bentomux_lib"

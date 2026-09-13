@@ -128,3 +128,7 @@ Tauri bundles macOS (`dmg`, `app`), Windows (`nsis`, `msi`), and Linux targets s
 - `out/renderer/` is generated build output and is not source code.
 - The frontend is intentionally kept close to the Electron version while backend responsibilities migrate to Rust.
 - Persisted state must remain camelCase so existing `bentomux.json` files continue to load correctly.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
