@@ -74,8 +74,18 @@ export async function checkForUpdate(): Promise<void> {
       set({ phase: 'current' });
     }
   } catch (e) {
-    set({ phase: 'error', error: String(e) });
+    set({ phase: 'error', error: describeCheckError(e) });
   }
+}
+
+/* the plugin reports a release with no updater manifest as a transport detail
+   ("Could not fetch a valid release JSON from the remote"); say what it means /
+   what to do instead of echoing the plugin */
+function describeCheckError(e: unknown): string {
+  const msg = String(e);
+  return /valid release JSON/i.test(msg)
+    ? 'no update manifest published for this release - download from the release page'
+    : msg;
 }
 
 export async function installUpdate(): Promise<void> {

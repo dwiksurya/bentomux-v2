@@ -89,11 +89,18 @@ jobs:
         shell: bash
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          # must be present (set, even if empty) whenever the key is: the tauri
+          # cli prompts for a missing password and dies with a misleading
+          # "incorrect updater private key password" on a runner without a tty.
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           CLOUDFLARED_ALL_MACOS_ARCHS: ${{ runner.os == 'macOS' && '1' || '' }}
         run: |
           # Validate signing key before use — non-empty but malformed base64 causes a
           # deep Tauri failure; catch it early so the error is obvious.
           SIGNING_KEY_VALID=0
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "::warning::TAURI_SIGNING_PRIVATE_KEY is not set - building without updater artifacts, so this release publishes no updater.json and installed apps cannot auto-update."
+          fi
           if [ -n "$TAURI_SIGNING_PRIVATE_KEY" ]; then
             if printf '%s' "$TAURI_SIGNING_PRIVATE_KEY" | tr -d '[:space:]' | grep -qE '^[A-Za-z0-9+/]+=*$'; then
               SIGNING_KEY_VALID=1
@@ -138,7 +145,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         run: |
           if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
-            echo "No signing key; skipping updater fragment"
+            echo "::warning::no signing key; skipping the updater fragment - no updater.json will be published"
             exit 0
           fi
           node scripts/release-manifest.mjs \
