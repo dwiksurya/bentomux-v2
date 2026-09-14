@@ -105,14 +105,23 @@ function Get-Asset($Manifest, [string]$Name) {
 
 $target = $null
 $fallbackTarget = $null
-switch ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()) {
-    'X64' { $target = 'windows-x86_64'; $fallbackTarget = 'windows-x86_64-msi' }
-    'Arm64' {
+# PROCESSOR_ARCHITECTURE, not RuntimeInformation.OSArchitecture: that type does not
+# resolve reliably in Windows PowerShell 5.1, which is what the documented
+# `powershell -ExecutionPolicy Bypass -c "irm ... | iex"` one-liner runs.
+# PROCESSOR_ARCHITEW6432 is set when a 32-bit shell runs on 64-bit Windows.
+# Off Windows no architecture is reported (scripts/verify-installer.ps1 exercises
+# the dry-run path there); x64 is the only Windows build published.
+$arch = $env:PROCESSOR_ARCHITECTURE
+if ($env:PROCESSOR_ARCHITEW6432) { $arch = $env:PROCESSOR_ARCHITEW6432 }
+if (-not $arch) { $arch = 'AMD64' }
+switch ($arch) {
+    'AMD64' { $target = 'windows-x86_64'; $fallbackTarget = 'windows-x86_64-msi' }
+    'ARM64' {
         Write-Note 'no native arm64 build is published yet; installing the x64 build (runs under emulation)'
         $target = 'windows-x86_64'
         $fallbackTarget = 'windows-x86_64-msi'
     }
-    default { Fail "unsupported architecture: $([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture)" }
+    default { Fail "unsupported architecture: $arch" }
 }
 
 Write-Step "target: $target"

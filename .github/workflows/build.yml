@@ -56,11 +56,20 @@ jobs:
       - run: cargo check --manifest-path src-tauri/Cargo.toml
       - run: npm run test:backend
 
-      - name: Check release tooling and installers
+      # Split per tool: a failure names the thing that broke instead of a bare
+      # "step failed" with three candidates.
+      - name: Check the release manifest generator
+        shell: bash
+        run: node scripts/release-manifest.mjs --selftest
+
+      - name: Check the POSIX installer
+        if: runner.os == 'Linux'
+        shell: bash
+        run: sh scripts/verify-installer.sh
+
+      - name: Check the PowerShell installer
         shell: bash
         run: |
-          node scripts/release-manifest.mjs --selftest
-          if [ "$RUNNER_OS" = "Linux" ]; then sh scripts/verify-installer.sh; fi
           if command -v pwsh >/dev/null 2>&1; then
             pwsh -NoProfile -File scripts/verify-installer.ps1
           else

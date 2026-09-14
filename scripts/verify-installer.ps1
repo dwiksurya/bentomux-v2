@@ -71,6 +71,18 @@ try {
     $result = Invoke-Installer $broken
     if ($result.ExitCode -eq 0) { Fail 'a manifest without assets was accepted' }
 
+    # 5. An arm64 host gets the x64 build under emulation instead of a refusal.
+    #    The architecture comes from PROCESSOR_ARCHITECTURE, which PowerShell 5.1
+    #    does report (RuntimeInformation.OSArchitecture does not always resolve).
+    Remove-Item (Join-Path $temp 'checksums.sha256') -Force
+    New-Checksum 'Bentomux_0.1.0_x64-setup.exe'
+    $env:PROCESSOR_ARCHITECTURE = 'ARM64'
+    $env:PROCESSOR_ARCHITEW6432 = $null
+    $result = Invoke-Installer (New-Manifest 'arm64.json')
+    if ($result.ExitCode -ne 0) { Fail "arm64 dry run failed:`n$($result.Output)" }
+    if ($result.Output -notmatch 'emulation') { Fail "arm64 was not explained:`n$($result.Output)" }
+    if ($result.Output -notmatch 'Bentomux_0\.1\.0_x64-setup\.exe') { Fail "arm64 skipped the x64 build:`n$($result.Output)" }
+
     Write-Host 'verify-installer.ps1: ok'
 } finally {
     Remove-Item -Path $temp -Recurse -Force -ErrorAction SilentlyContinue
