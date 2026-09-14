@@ -37,38 +37,38 @@ const RELEASES = {
   },
 };
 
-if (process.env.TAURI_ENV_TARGET_TRIPLE === 'universal-apple-darwin' && process.argv.includes('--check')) {
+// Tauri v2 does NOT set TAURI_ENV_TARGET_TRIPLE. For universal-apple-darwin builds,
+// CI must set CLOUDFLARED_ALL_MACOS_ARCHS=1 (or run this script twice with CLOUDFLARED_TARGET).
+// The TAURI_ENV_ARCH env var is set by Tauri v2 and can map a single arch; for universal
+// we rely on the explicit CI escape hatch below.
+
+const isUniversalMacOS = process.env.CLOUDFLARED_ALL_MACOS_ARCHS === '1';
+
+if (isUniversalMacOS && process.argv.includes('--check')) {
   for (const target of ['darwin-x86_64', 'darwin-aarch64']) console.log(`${target}: ${join(RESOURCE_ROOT, target, 'cloudflared')}`);
   process.exit(0);
 }
 
-if (process.env.TAURI_ENV_TARGET_TRIPLE === 'universal-apple-darwin') {
+if (isUniversalMacOS) {
   for (const target of ['darwin-x86_64', 'darwin-aarch64']) {
     execFileSync(process.execPath, [fileURLToPath(import.meta.url)], {
       stdio: 'inherit',
-      env: { ...process.env, TAURI_ENV_TARGET_TRIPLE: '', CLOUDFLARED_TARGET: target },
+      env: { ...process.env, CLOUDFLARED_ALL_MACOS_ARCHS: '', CLOUDFLARED_TARGET: target },
     });
   }
   process.exit(0);
 }
 
 function hostTarget() {
-  const triple = process.env.TAURI_ENV_TARGET_TRIPLE;
-  if (triple) {
-    if (triple === 'x86_64-apple-darwin') return 'darwin-x86_64';
-    if (triple === 'aarch64-apple-darwin') return 'darwin-aarch64';
-    if (triple === 'x86_64-unknown-linux-gnu') return 'linux-x86_64';
-    if (triple === 'aarch64-unknown-linux-gnu') return 'linux-aarch64';
-    if (triple === 'x86_64-pc-windows-msvc' || triple === 'x86_64-pc-windows-gnu') return 'windows-x86_64';
-    throw new Error(`Unsupported cloudflared Tauri target: ${triple}`);
-  }
-  const platform = process.platform;
-  const arch = process.arch;
-  if (platform === 'darwin' && arch === 'x64') return 'darwin-x86_64';
-  if (platform === 'darwin' && arch === 'arm64') return 'darwin-aarch64';
-  if (platform === 'linux' && arch === 'x64') return 'linux-x86_64';
-  if (platform === 'linux' && arch === 'arm64') return 'linux-aarch64';
-  if (platform === 'win32' && arch === 'x64') return 'windows-x86_64';
+  // Tauri v2 sets TAURI_ENV_ARCH (e.g. 'x86_64', 'aarch64') and TAURI_ENV_PLATFORM (e.g. 'darwin').
+  const platform = process.env.TAURI_ENV_PLATFORM || process.platform.replace('win32', 'windows').replace('darwin', 'darwin');
+  const arch = process.env.TAURI_ENV_ARCH || (process.arch === 'x64' ? 'x86_64' : process.arch === 'arm64' ? 'aarch64' : process.arch);
+  const os = process.platform;
+  if ((platform === 'darwin' || os === 'darwin') && arch === 'x86_64') return 'darwin-x86_64';
+  if ((platform === 'darwin' || os === 'darwin') && arch === 'aarch64') return 'darwin-aarch64';
+  if ((platform === 'linux' || os === 'linux') && arch === 'x86_64') return 'linux-x86_64';
+  if ((platform === 'linux' || os === 'linux') && arch === 'aarch64') return 'linux-aarch64';
+  if ((platform === 'windows' || os === 'win32') && arch === 'x86_64') return 'windows-x86_64';
   throw new Error(`Unsupported cloudflared build target: ${platform}/${arch}`);
 }
 function targetPath(target) {

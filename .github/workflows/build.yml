@@ -76,14 +76,41 @@ jobs:
             echo "pwsh unavailable; skipping the PowerShell installer check"
           fi
 
+      - name: Prepare cloudflared binaries
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            CLOUDFLARED_ALL_MACOS_ARCHS=1 node scripts/prepare-cloudflared.mjs
+          else
+            node scripts/prepare-cloudflared.mjs
+          fi
+
       - name: Build
         shell: bash
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         run: |
-          # Inject createUpdaterArtifacts only when the signing key is present
-          UPDATER_CFG='{}'
+          # Validate signing key before use — non-empty but malformed base64 causes a
+          # deep Tauri failure; catch it early so the error is obvious.
+          SIGNING_KEY_VALID=0
           if [ -n "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            if python3 -c "
+import base64, os, sys
+try:
+    base64.b64decode(os.environ['TAURI_SIGNING_PRIVATE_KEY'].strip(), validate=True)
+except Exception as e:
+    print(f'TAURI_SIGNING_PRIVATE_KEY is not valid base64: {e}', flush=True)
+    sys.exit(1)
+" 2>&1; then
+              SIGNING_KEY_VALID=1
+            else
+              echo "::warning::TAURI_SIGNING_PRIVATE_KEY is set but invalid — skipping updater artifacts. Fix the secret to enable auto-updates."
+            fi
+          fi
+
+          # Inject createUpdaterArtifacts only when the signing key is present AND valid
+          UPDATER_CFG='{}'
+          if [ "$SIGNING_KEY_VALID" = "1" ]; then
             UPDATER_CFG='{"bundle":{"createUpdaterArtifacts":true}}'
           fi
           if [ "$RUNNER_OS" = "macOS" ]; then

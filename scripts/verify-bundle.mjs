@@ -23,6 +23,22 @@ for (const name of required) {
   if (!bundled) console.log(`resource check deferred: ${name} (installer packaging removed unpacked app)`);
 }
 
+// Verify cloudflared binaries are present in source resources (they get bundled into the app).
+// Missing binaries mean remote control will show 'install cloudflared' error at runtime.
+const cloudflaredTargets = {
+  macOS: ['darwin-x86_64/cloudflared', 'darwin-aarch64/cloudflared'],
+  Linux: ['linux-x86_64/cloudflared'],
+  Windows: ['windows-x86_64/cloudflared.exe'],
+};
+const runnerOs = process.env.RUNNER_OS; // set by GitHub Actions
+const expectedTargets = cloudflaredTargets[runnerOs] || [];
+for (const t of expectedTargets) {
+  const p = join('resources', 'cloudflared', t);
+  const { existsSync } = await import('node:fs');
+  if (!existsSync(p)) throw new Error(`missing cloudflared binary: ${p} — run 'npm run prepare:cloudflared' before bundling`);
+}
+if (expectedTargets.length) console.log(`cloudflared binaries verified: ${expectedTargets.join(', ')}`);
+
 const sourceResources = await walk('resources');
 for (const name of required) {
   if (!sourceResources.some(file => file.endsWith(`/${name}`) || file.endsWith(`\\${name}`))) {
