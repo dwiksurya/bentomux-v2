@@ -48,6 +48,40 @@ Bentomux v2 is the Tauri 2 port of the original Electron application. The render
 - Rebind command-palette and split-pane shortcuts
 - Configure remote monitoring, approval overlay size, notification sound, sidebar width, and expanded sections
 
+## Install
+
+Prebuilt releases are published for macOS, Linux (x86_64) and Windows.
+
+**macOS and Linux**
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/takora-dev/bentomux-v2/master/installers/install.sh | sh
+```
+
+Installs the `.app` bundle into `/Applications` on macOS, and the AppImage into `~/.local/bin` (plus a desktop entry) on Linux. Add `--deb` to install the Debian package through `apt` instead, or `--dry-run` to resolve and verify the release without installing anything.
+
+**Windows**
+
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/takora-dev/bentomux-v2/master/installers/install.ps1 | iex"
+```
+
+Where policy or endpoint security blocks PowerShell running straight from the internet:
+
+```bat
+curl.exe -fsSLo install.cmd https://raw.githubusercontent.com/takora-dev/bentomux-v2/master/installers/install.cmd && install.cmd && del install.cmd
+```
+
+Windows installs the per-user NSIS setup (no UAC prompt), falling back to the MSI.
+
+**Homebrew**
+
+```sh
+brew install takora-dev/tap/bentomux
+```
+
+Every installer reads the release manifest (`releases/latest/download/latest.json`), downloads the build for your platform and refuses to install it unless the SHA-256 matches. The builds are not signed or notarized yet, so macOS may ask you to confirm the first launch under System Settings → Privacy & Security.
+
 ## Getting started
 
 ### Requirements
@@ -75,6 +109,8 @@ npm run tauri dev
 | `npm run typecheck` | Run TypeScript type checking with `tsc --noEmit` |
 | `npm run tauri dev` | Run the complete Tauri desktop application |
 | `npm run tauri build` | Build distributable Tauri bundles |
+| `npm run test:release` | Check the release manifest and Homebrew cask generator |
+| `npm run test:installer` | Install into a throwaway prefix from a fixture manifest |
 | `cargo check --manifest-path src-tauri/Cargo.toml` | Check the Rust backend |
 
 There is currently no configured JavaScript test runner, linter, or formatter.

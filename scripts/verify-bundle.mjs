@@ -30,7 +30,7 @@ for (const name of required) {
   }
 }
 
-const artifacts = files.filter(file => /\.(app|dmg|AppImage|msi)$/i.test(file));
+const artifacts = files.filter(file => /\.(app|dmg|AppImage|msi|deb)$/i.test(file) || /-setup\.exe$/i.test(file));
 if (artifacts.length === 0) throw new Error(`no installer artifact found under ${root}`);
 
 for (const file of artifacts) {
