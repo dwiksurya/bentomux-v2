@@ -55,6 +55,18 @@ jobs:
       - run: npm run build
       - run: cargo check --manifest-path src-tauri/Cargo.toml
       - run: npm run test:backend
+
+      - name: Check release tooling and installers
+        shell: bash
+        run: |
+          node scripts/release-manifest.mjs --selftest
+          if [ "$RUNNER_OS" = "Linux" ]; then sh scripts/verify-installer.sh; fi
+          if command -v pwsh >/dev/null 2>&1; then
+            pwsh -NoProfile -File scripts/verify-installer.ps1
+          else
+            echo "pwsh unavailable; skipping the PowerShell installer check"
+          fi
+
       - name: Build
         shell: bash
         run: |
@@ -69,6 +81,15 @@ jobs:
       - name: Validate packaged resources and sizes
         run: node scripts/verify-bundle.mjs "$BUNDLE_DIR"
 
+      - name: Generate checksums
+        shell: bash
+        run: |
+          mkdir -p dist
+          if command -v sha256sum >/dev/null 2>&1; then HASHER=sha256sum; else HASHER="shasum -a 256"; fi
+          find "$BUNDLE_DIR" -type f \( -name '*.dmg' -o -name '*.AppImage' -o -name '*.deb' -o -name '*.msi' -o -name '*-setup.exe' \) -print0 \
+            | sort -z | xargs -0 $HASHER > dist/checksums.sha256
+          cat dist/checksums.sha256
+
       - name: Upload packaged artifact
         uses: actions/upload-artifact@v4
         with:
@@ -76,7 +97,16 @@ jobs:
           path: |
             ${{ env.BUNDLE_DIR }}/**/*.dmg
             ${{ env.BUNDLE_DIR }}/**/*.AppImage
+            ${{ env.BUNDLE_DIR }}/**/*.deb
             ${{ env.BUNDLE_DIR }}/**/*.msi
+            ${{ env.BUNDLE_DIR }}/**/*-setup.exe
+          if-no-files-found: error
+
+      - name: Upload checksum list
+        uses: actions/upload-artifact@v4
+        with:
+          name: bentomux-checksums-${{ runner.os }}
+          path: dist/checksums.sha256
           if-no-files-found: error
 
       - name: Publish release
@@ -87,5 +117,66 @@ jobs:
         run: |
           gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || \
             gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
-          find "$BUNDLE_DIR" -type f \( -name '*.dmg' -o -name '*.AppImage' -o -name '*.msi' \) \
+          find "$BUNDLE_DIR" -type f \( -name '*.dmg' -o -name '*.AppImage' -o -name '*.deb' -o -name '*.msi' -o -name '*-setup.exe' \) \
             -exec gh release upload "$GITHUB_REF_NAME" {} --clobber \;
+
+  manifest:
+    needs: verify
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bentomux-checksums-*
+          merge-multiple: true
+          path: dist/checksums
+
+      - name: Build latest.json and the Homebrew cask
+        run: |
+          node scripts/release-manifest.mjs --selftest
+          mkdir -p dist/out
+          node scripts/release-manifest.mjs --tag "$GITHUB_REF_NAME" \
+            --checksums dist/checksums --out dist/out/latest.json --cask dist/out/bentomux.rb
+          cat dist/checksums/*.sha256 | sort -k2 > dist/out/sha256sums.txt
+          cat dist/out/latest.json
+
+      - name: Publish the manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for attempt in 1 2 3 4 5; do
+            gh release upload "$GITHUB_REF_NAME" dist/out/latest.json dist/out/sha256sums.txt --clobber && exit 0
+            echo "upload attempt $attempt failed; retrying"
+            sleep 10
+          done
+          echo "::error::could not publish latest.json to $GITHUB_REF_NAME"
+          exit 1
+
+      - name: Bump the Homebrew tap
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [ -z "$TAP_TOKEN" ]; then
+            echo "::notice::HOMEBREW_TAP_TOKEN is not set; skipping the tap bump"
+            exit 0
+          fi
+          git clone --depth 1 "https://x-access-token:${TAP_TOKEN}@github.com/takora-dev/homebrew-tap.git" tap || {
+            echo "::warning::cannot reach takora-dev/homebrew-tap; skipping the bump"
+            exit 0
+          }
+          mkdir -p tap/Casks
+          cp dist/out/bentomux.rb tap/Casks/bentomux.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Casks/bentomux.rb
+          if git diff --cached --quiet; then
+            echo "the cask is already up to date"
+            exit 0
+          fi
+          git commit -m "bentomux ${GITHUB_REF_NAME#v}"
+          git push

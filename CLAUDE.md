@@ -55,6 +55,8 @@ src-tauri/
 resources/
   bentomux-hook.cjs     # Agent hook CLI (bundled as resource)
   remote-page.html      # Remote monitor page
+installers/             # install.sh / install.ps1 / install.cmd one-liners for releases
+scripts/                # release-manifest.mjs (latest.json + Homebrew cask), verify-installer.{sh,ps1}
 out/renderer/           # Vite build output (gitignored, frontendDist)
 vite.config.ts          # root: src/, two rollup inputs (main + approval), @ alias
 tsconfig.json           # ES2022/ESNext, bundler resolution, strict
