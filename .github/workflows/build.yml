@@ -182,16 +182,16 @@ jobs:
         run: |
           gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || \
             gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
-          find "$BUNDLE_DIR" -type f \(
-            -name '*.dmg'
-            -o -name '*.AppImage'
-            -o -name '*.deb'
-            -o -name '*.msi'
-            -o -name '*-setup.exe'
-            -o -name '*.app.tar.gz'
-            -o -name '*.AppImage.tar.gz'
-            -o -name '*.nsis.zip'
-            -o -name '*.sig'
+          find "$BUNDLE_DIR" -type f \( \
+            -name '*.dmg' \
+            -o -name '*.AppImage' \
+            -o -name '*.deb' \
+            -o -name '*.msi' \
+            -o -name '*-setup.exe' \
+            -o -name '*.app.tar.gz' \
+            -o -name '*.AppImage.tar.gz' \
+            -o -name '*.nsis.zip' \
+            -o -name '*.sig' \
           \) -exec gh release upload "$GITHUB_REF_NAME" {} --clobber \;
 
   manifest:
