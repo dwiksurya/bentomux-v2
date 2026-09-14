@@ -94,17 +94,10 @@ jobs:
           # deep Tauri failure; catch it early so the error is obvious.
           SIGNING_KEY_VALID=0
           if [ -n "$TAURI_SIGNING_PRIVATE_KEY" ]; then
-            if python3 -c "
-import base64, os, sys
-try:
-    base64.b64decode(os.environ['TAURI_SIGNING_PRIVATE_KEY'].strip(), validate=True)
-except Exception as e:
-    print(f'TAURI_SIGNING_PRIVATE_KEY is not valid base64: {e}', flush=True)
-    sys.exit(1)
-" 2>&1; then
+            if printf '%s' "$TAURI_SIGNING_PRIVATE_KEY" | tr -d '[:space:]' | grep -qE '^[A-Za-z0-9+/]+=*$'; then
               SIGNING_KEY_VALID=1
             else
-              echo "::warning::TAURI_SIGNING_PRIVATE_KEY is set but invalid — skipping updater artifacts. Fix the secret to enable auto-updates."
+              echo "::warning::TAURI_SIGNING_PRIVATE_KEY is set but not valid base64 - skipping updater artifacts. Fix the secret to enable auto-updates."
             fi
           fi
 
