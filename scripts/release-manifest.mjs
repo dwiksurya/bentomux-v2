@@ -147,6 +147,13 @@ function selftest() {
   assert.equal(parseChecksums(`${'A'.repeat(64)}  x.zip\r\n`)[0].sha256, 'a'.repeat(64));
   assert.equal(parseChecksums('not-a-hash  file\n').length, 0);
 
+  // updater platform mapping must cover what tauri v2 actually emits
+  assert.deepEqual(updaterPlatforms('Bentomux.app.tar.gz'), ['darwin-aarch64', 'darwin-x86_64']);
+  assert.deepEqual(updaterPlatforms('Bentomux_0.2.9_amd64.AppImage'), ['linux-x86_64']);
+  assert.deepEqual(updaterPlatforms('Bentomux_0.2.9_x64-setup.exe'), ['windows-x86_64']);
+  assert.deepEqual(updaterPlatforms('bentomux_0.2.9_aarch64.AppImage'), ['linux-aarch64']);
+  assert.deepEqual(updaterPlatforms('bentomux_0.2.9_amd64.deb'), []);
+
   const dmgSha = 'b'.repeat(64);
   const checksums = [
     { sha256: '1'.repeat(64), file: 'Bentomux_0.1.0_aarch64.dmg' },
@@ -192,17 +199,19 @@ function selftest() {
      "darwin-aarch64": { url, signature }, ... } }
    .sig files contain the raw minisign signature string. */
 
-/** Map a bundle file basename to Tauri updater platform key(s). */
+/** Map a bundle file basename to Tauri updater platform key(s).
+ *  Tauri v2 updater artifacts: macOS .app.tar.gz; Linux AppImage (signed
+ *  directly); Windows NSIS setup .exe (signed directly). */
 export function updaterPlatforms(file) {
   const name = basename(file);
   // macOS: .app.tar.gz → both arm64 and x86_64 (universal binary covers both)
   if (/\.app\.tar\.gz$/i.test(name)) return ['darwin-aarch64', 'darwin-x86_64'];
   // Linux AppImage
-  if (/\.AppImage\.tar\.gz$/i.test(name)) {
+  if (/\.AppImage$/i.test(name)) {
     return [/(aarch64|arm64)/i.test(name) ? 'linux-aarch64' : 'linux-x86_64'];
   }
-  // Windows NSIS zip
-  if (/\.nsis\.zip$/i.test(name)) {
+  // Windows NSIS setup
+  if (/setup\.exe$/i.test(name)) {
     return [/(aarch64|arm64)/i.test(name) ? 'windows-aarch64' : 'windows-x86_64'];
   }
   return [];
