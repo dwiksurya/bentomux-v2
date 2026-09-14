@@ -46,24 +46,37 @@ jobs:
         with:
           toolchain: stable
 
+      - name: Add macOS universal targets
+        if: runner.os == 'macOS'
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
       - run: npm ci
       - run: npm run typecheck
       - run: npm run build
       - run: cargo check --manifest-path src-tauri/Cargo.toml
       - run: npm run test:backend
-      - run: npm run tauri -- build
+      - name: Build
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            npm run tauri -- build --target universal-apple-darwin
+            echo "BUNDLE_DIR=src-tauri/target/universal-apple-darwin/release/bundle" >> "$GITHUB_ENV"
+          else
+            npm run tauri -- build
+            echo "BUNDLE_DIR=src-tauri/target/release/bundle" >> "$GITHUB_ENV"
+          fi
 
       - name: Validate packaged resources and sizes
-        run: node scripts/verify-bundle.mjs src-tauri/target/release/bundle
+        run: node scripts/verify-bundle.mjs "$BUNDLE_DIR"
 
       - name: Upload packaged artifact
         uses: actions/upload-artifact@v4
         with:
           name: bentomux-${{ runner.os }}
           path: |
-            src-tauri/target/release/bundle/**/*.dmg
-            src-tauri/target/release/bundle/**/*.AppImage
-            src-tauri/target/release/bundle/**/*.msi
+            ${{ env.BUNDLE_DIR }}/**/*.dmg
+            ${{ env.BUNDLE_DIR }}/**/*.AppImage
+            ${{ env.BUNDLE_DIR }}/**/*.msi
           if-no-files-found: error
 
       - name: Publish release
@@ -74,5 +87,5 @@ jobs:
         run: |
           gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || \
             gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
-          find src-tauri/target/release/bundle -type f \( -name '*.dmg' -o -name '*.AppImage' -o -name '*.msi' \) \
+          find "$BUNDLE_DIR" -type f \( -name '*.dmg' -o -name '*.AppImage' -o -name '*.msi' \) \
             -exec gh release upload "$GITHUB_REF_NAME" {} --clobber \;
