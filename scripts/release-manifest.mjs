@@ -16,6 +16,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { readFile, writeFile, mkdir, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
+import { glob } from 'node:fs/promises';
 
 const REPO = 'takora-dev/bentomux-v2';
 const SCHEMA_VERSION = 1;
@@ -186,6 +187,62 @@ function selftest() {
   console.log('release-manifest selftest: ok');
 }
 
+/* ---------------- Tauri updater manifest (updater.json) ----------------
+   Tauri updater format: { version, notes, pub_date, platforms: {
+     "darwin-aarch64": { url, signature }, ... } }
+   .sig files contain the raw minisign signature string. */
+
+/** Map a bundle file basename to Tauri updater platform key(s). */
+export function updaterPlatforms(file) {
+  const name = basename(file);
+  // macOS: .app.tar.gz → both arm64 and x86_64 (universal binary covers both)
+  if (/\.app\.tar\.gz$/i.test(name)) return ['darwin-aarch64', 'darwin-x86_64'];
+  // Linux AppImage
+  if (/\.AppImage\.tar\.gz$/i.test(name)) {
+    return [/(aarch64|arm64)/i.test(name) ? 'linux-aarch64' : 'linux-x86_64'];
+  }
+  // Windows NSIS zip
+  if (/\.nsis\.zip$/i.test(name)) {
+    return [/(aarch64|arm64)/i.test(name) ? 'windows-aarch64' : 'windows-x86_64'];
+  }
+  return [];
+}
+
+/** Build the updater fragment for one runner's bundle dir. */
+export async function buildUpdaterFragment(bundleDir, { repo, tag }) {
+  const platforms = {};
+  // walk bundleDir recursively for *.sig files next to the artifact they sign
+  for await (const sigPath of glob('**/*.sig', { cwd: bundleDir })) {
+    const artifactPath = sigPath.slice(0, -4); // strip .sig
+    const artifactName = basename(artifactPath);
+    const keys = updaterPlatforms(artifactName);
+    if (!keys.length) continue;
+    const [sig] = await Promise.all([readFile(join(bundleDir, sigPath), 'utf8')]);
+    const url = `https://github.com/${repo}/releases/download/${tag}/${artifactName}`;
+    for (const key of keys) {
+      platforms[key] = { url, signature: sig.trim() };
+    }
+  }
+  return platforms;
+}
+
+/** Merge per-runner fragment files into a Tauri updater.json. */
+export async function buildUpdaterManifest(fragmentsDir, { tag }) {
+  const version = tag.replace(/^v/, '');
+  const platforms = {};
+  const files = await readdir(fragmentsDir);
+  for (const file of files.filter(f => f.endsWith('.json'))) {
+    const data = JSON.parse(await readFile(join(fragmentsDir, file), 'utf8'));
+    Object.assign(platforms, data);
+  }
+  return {
+    version,
+    notes: '',
+    pub_date: new Date().toISOString(),
+    platforms,
+  };
+}
+
 function parseArgs(argv) {
   const args = { checksums: [], repo: REPO };
   for (let i = 0; i < argv.length; i += 1) {
@@ -197,6 +254,10 @@ function parseArgs(argv) {
     else if (flag === '--out') { args.out = value; i += 1; }
     else if (flag === '--cask') { args.cask = value; i += 1; }
     else if (flag === '--repo') { args.repo = value; i += 1; }
+    else if (flag === '--updater-fragment') { args.updaterFragment = true; }
+    else if (flag === '--bundle') { args.bundle = value; i += 1; }
+    else if (flag === '--updater-manifest') { args.updaterManifest = true; }
+    else if (flag === '--updater-fragments') { args.updaterFragments = value; i += 1; }
     else throw new Error(`unknown argument: ${flag}`);
   }
   return args;
@@ -225,6 +286,43 @@ async function main() {
     selftest();
     return;
   }
+
+  /* --updater-fragment: emit per-runner platform fragment from bundle dir */
+  if (args.updaterFragment) {
+    if (!args.bundle) throw new Error('--bundle is required with --updater-fragment');
+    if (!args.tag) throw new Error('--tag is required with --updater-fragment');
+    const fragment = await buildUpdaterFragment(args.bundle, { repo: args.repo, tag: args.tag });
+    if (Object.keys(fragment).length === 0) {
+      console.log('no updater artifacts found in', args.bundle, '(signing key absent? skipping)');
+      return;
+    }
+    const out = args.out;
+    if (out) {
+      await mkdir(dirname(out), { recursive: true });
+      await writeFile(out, JSON.stringify(fragment, null, 2) + '\n');
+      console.log(`wrote ${out} (${Object.keys(fragment).join(', ')})`);
+    } else {
+      process.stdout.write(JSON.stringify(fragment, null, 2) + '\n');
+    }
+    return;
+  }
+
+  /* --updater-manifest: merge fragments into Tauri updater.json */
+  if (args.updaterManifest) {
+    if (!args.updaterFragments) throw new Error('--updater-fragments is required with --updater-manifest');
+    if (!args.tag) throw new Error('--tag is required with --updater-manifest');
+    const manifest = await buildUpdaterManifest(args.updaterFragments, { tag: args.tag });
+    const json = JSON.stringify(manifest, null, 2) + '\n';
+    if (args.out) {
+      await mkdir(dirname(args.out), { recursive: true });
+      await writeFile(args.out, json);
+      console.log(`wrote ${args.out} (platforms: ${Object.keys(manifest.platforms).join(', ') || 'none'})`);
+    } else {
+      process.stdout.write(json);
+    }
+    return;
+  }
+
   if (!args.tag) throw new Error('--tag is required');
   if (args.checksums.length === 0) throw new Error('--checksums is required');
 

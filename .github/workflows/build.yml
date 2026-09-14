@@ -78,12 +78,19 @@ jobs:
 
       - name: Build
         shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         run: |
+          # Inject createUpdaterArtifacts only when the signing key is present
+          UPDATER_CFG='{}'
+          if [ -n "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            UPDATER_CFG='{"bundle":{"createUpdaterArtifacts":true}}'
+          fi
           if [ "$RUNNER_OS" = "macOS" ]; then
-            npm run tauri -- build --target universal-apple-darwin
+            npm run tauri -- build --target universal-apple-darwin --config "$UPDATER_CFG"
             echo "BUNDLE_DIR=src-tauri/target/universal-apple-darwin/release/bundle" >> "$GITHUB_ENV"
           else
-            npm run tauri -- build
+            npm run tauri -- build --config "$UPDATER_CFG"
             echo "BUNDLE_DIR=src-tauri/target/release/bundle" >> "$GITHUB_ENV"
           fi
 
@@ -102,6 +109,22 @@ jobs:
           find "$BUNDLE_DIR" -type f \( -name '*.dmg' -o -name '*.AppImage' -o -name '*.deb' -o -name '*.msi' -o -name '*-setup.exe' \) -print0 \
             | sort -z | xargs -0 $HASHER > "dist/checksums-${RUNNER_OS}.sha256"
           cat "dist/checksums-${RUNNER_OS}.sha256"
+
+      - name: Generate updater fragment
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "No signing key; skipping updater fragment"
+            exit 0
+          fi
+          node scripts/release-manifest.mjs \
+            --updater-fragment \
+            --bundle "$BUNDLE_DIR" \
+            --tag "$GITHUB_REF_NAME" \
+            --out "dist/updater-${RUNNER_OS}.json"
 
       - name: Upload packaged artifact
         uses: actions/upload-artifact@v4
@@ -122,6 +145,14 @@ jobs:
           path: dist/checksums-*.sha256
           if-no-files-found: error
 
+      - name: Upload updater fragment
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4
+        with:
+          name: bentomux-updater-${{ runner.os }}
+          path: dist/updater-*.json
+          if-no-files-found: ignore
+
       - name: Publish release
         if: startsWith(github.ref, 'refs/tags/v')
         shell: bash
@@ -130,8 +161,17 @@ jobs:
         run: |
           gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || \
             gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
-          find "$BUNDLE_DIR" -type f \( -name '*.dmg' -o -name '*.AppImage' -o -name '*.deb' -o -name '*.msi' -o -name '*-setup.exe' \) \
-            -exec gh release upload "$GITHUB_REF_NAME" {} --clobber \;
+          find "$BUNDLE_DIR" -type f \(
+            -name '*.dmg'
+            -o -name '*.AppImage'
+            -o -name '*.deb'
+            -o -name '*.msi'
+            -o -name '*-setup.exe'
+            -o -name '*.app.tar.gz'
+            -o -name '*.AppImage.tar.gz'
+            -o -name '*.nsis.zip'
+            -o -name '*.sig'
+          \) -exec gh release upload "$GITHUB_REF_NAME" {} --clobber \;
 
   manifest:
     needs: verify
@@ -148,6 +188,13 @@ jobs:
           merge-multiple: true
           path: dist/checksums
 
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bentomux-updater-*
+          merge-multiple: true
+          path: dist/updater-fragments
+        continue-on-error: true  # fragments absent when signing key not set
+
       - name: Build latest.json and the Homebrew cask
         run: |
           ls -l dist/checksums
@@ -158,12 +205,27 @@ jobs:
           cat dist/checksums/*.sha256 | sort -k2 > dist/out/sha256sums.txt
           cat dist/out/latest.json
 
+      - name: Build updater.json
+        run: |
+          if [ -d dist/updater-fragments ] && ls dist/updater-fragments/*.json >/dev/null 2>&1; then
+            node scripts/release-manifest.mjs \
+              --updater-manifest \
+              --updater-fragments dist/updater-fragments \
+              --tag "$GITHUB_REF_NAME" \
+              --out dist/out/updater.json
+            echo "updater.json built"
+          else
+            echo "No updater fragments found (signing key not configured); skipping updater.json"
+          fi
+
       - name: Publish the manifest
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          EXTRA=""
+          if [ -f dist/out/updater.json ]; then EXTRA="dist/out/updater.json"; fi
           for attempt in 1 2 3 4 5; do
-            gh release upload "$GITHUB_REF_NAME" dist/out/latest.json dist/out/sha256sums.txt --clobber && exit 0
+            gh release upload "$GITHUB_REF_NAME" dist/out/latest.json dist/out/sha256sums.txt $EXTRA --clobber && exit 0
             echo "upload attempt $attempt failed; retrying"
             sleep 10
           done

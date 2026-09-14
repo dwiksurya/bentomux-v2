@@ -20,6 +20,7 @@ import { initKeyboard } from './keyboard';
 import { diffPage } from './views/diff';
 import { refreshChangesPill } from './views/gitPanel';
 import { initAgentEvents } from './views/agent-events';
+import { initAutoUpdate, updateStatus, onUpdateChange } from './updates';
 document.documentElement.classList.toggle('macos', /Mac/.test(navigator.platform));
 
 const MIN_SIDEBAR_WIDTH = 248;
@@ -295,6 +296,40 @@ function logSmokeIfRequested(): void {
   }
 }
 
+function wireUpdateBanner(): void {
+  const banner = document.getElementById('updateBanner');
+  if (!banner) return;
+  const b = banner;
+  let dismissed = false;
+
+  function paint(): void {
+    const s = updateStatus;
+    if (dismissed || (s.phase !== 'available' && s.phase !== 'ready')) {
+      b.hidden = true;
+      return;
+    }
+    b.hidden = false;
+    b.innerHTML = '';
+    const msg = s.phase === 'ready'
+      ? 'Bentomux v' + s.available + ' installed — restart to apply'
+      : 'Bentomux v' + s.available + ' available';
+    const settingsBtn = h('button', {
+      class: 'btn primary',
+      type: 'button',
+      onclick: () => { void import('./views/settings').then(m => m.openSettingsModal()); },
+    }, s.phase === 'ready' ? 'Restart' : 'Update');
+    const closeBtn = h('button', {
+      class: 'btn ghost',
+      type: 'button',
+      onclick: () => { dismissed = true; b.hidden = true; },
+    }, '×');
+    b.append(h('span', { class: 'update-banner-msg' }, msg), settingsBtn, closeBtn);
+  }
+
+  onUpdateChange(paint);
+  paint();
+}
+
 async function boot(): Promise<void> {
   const bootStart = performance.now();
   setDb(await window.bentomux.getState());
@@ -333,6 +368,9 @@ async function boot(): Promise<void> {
   logSmokeIfRequested();
   console.info('[perf] renderer-boot-ms=' + Math.round(performance.now() - bootStart));
 
+  /* update check (after render so UI is not blocked) */
+  wireUpdateBanner();
+  initAutoUpdate(db.prefs.autoUpdate !== false);
 }
 boot().catch(e => {
   console.error(e);

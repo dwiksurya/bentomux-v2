@@ -24,6 +24,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub fn run() {
     let process_start = std::time::Instant::now();
     let mut builder = tauri::Builder::default();
+    builder = builder
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_opener::init());
     builder = builder.setup(move |app| {
         eprintln!("[perf] backend-ready-ms={}", process_start.elapsed().as_millis());
         use tauri::Emitter;

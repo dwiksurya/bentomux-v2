@@ -11,6 +11,11 @@ import { db } from '../store';
 import { setThemeMode, setPalette, setTerminalFont, setTerminalFontSize } from '../main';
 import { accelFor, formatAccel, type ActionId } from '../keyboard';
 import { PALETTES, type PaletteName, type AgentHooksStatus, type Prefs } from '../../shared/types';
+import {
+  updateStatus, checkForUpdate, installUpdate, restartApp, onUpdateChange,
+  type UpdatePhase,
+} from '../updates';
+import { openUrl } from '@tauri-apps/plugin-opener';
 
 /* persist one pref key and run any immediate side effect; callers repaint
    the modal content afterwards */
@@ -295,6 +300,73 @@ function buildNotificationsSection(paint: () => void): HTMLElement {
     hint('Claude Code asks Bentomux for permission decisions, answered in the floating overlay. Requires Node on PATH; agents fail open when Bentomux is closed.'));
 }
 
+/* ---------------- Updates ---------------- */
+
+const PHASE_LABEL: Record<UpdatePhase, string> = {
+  idle:        'Not checked yet',
+  checking:    'Checking…',
+  current:     'Up to date',
+  available:   'Update available',
+  downloading: 'Downloading…',
+  ready:       'Ready to install',
+  error:       'Check failed',
+};
+
+function buildUpdatesSection(paint: () => void): HTMLElement {
+  const statusLine = h('span', { class: 'settings-hint' }, '…');
+  const checkBtn   = h('button', { class: 'btn', type: 'button' }, 'Check now') as HTMLButtonElement;
+  const actionBtn  = h('button', { class: 'btn primary', type: 'button', style: 'display:none' }, '') as HTMLButtonElement;
+  const fallback   = h('a', { class: 'settings-hint', href: '#', style: 'display:none' }, 'Open release page') as HTMLAnchorElement;
+  let unsub: (() => void) | null = null;
+
+  function paintStatus(): void {
+    const s = updateStatus;
+    statusLine.textContent = PHASE_LABEL[s.phase]
+      + (s.phase === 'available' || s.phase === 'ready' ? ' — v' + s.available : '')
+      + (s.phase === 'downloading' ? ' ' + s.progress + '%' : '')
+      + (s.phase === 'error' ? ': ' + s.error : '');
+
+    const showInstall = s.phase === 'available';
+    const showRestart = s.phase === 'ready';
+    const showFallback = s.phase === 'error';
+
+    actionBtn.style.display = (showInstall || showRestart) ? '' : 'none';
+    actionBtn.textContent   = showRestart ? 'Restart now' : 'Install update';
+    fallback.style.display  = showFallback ? '' : 'none';
+    fallback.href           = s.releaseUrl;
+    checkBtn.disabled       = s.phase === 'checking' || s.phase === 'downloading';
+  }
+
+  paintStatus();
+  unsub = onUpdateChange(paintStatus);
+  /* detach when the section is removed from DOM */
+  statusLine.addEventListener('disconnectedCallback', () => unsub?.());
+
+  checkBtn.addEventListener('click', () => { void checkForUpdate(); });
+  actionBtn.addEventListener('click', () => {
+    if (updateStatus.phase === 'ready') { void restartApp(); }
+    else { void installUpdate(); }
+  });
+  fallback.addEventListener('click', e => { e.preventDefault(); void openUrl(updateStatus.releaseUrl); });
+
+  const versionHint = h('div', { class: 'settings-hint' },
+    'Installed: v' + (updateStatus.version || '…'));
+
+  /* keep installed version up to date if it resolved after modal open */
+  const unsubVersion = onUpdateChange(() => {
+    versionHint.textContent = 'Installed: v' + (updateStatus.version || '…');
+  });
+  versionHint.addEventListener('disconnectedCallback', () => unsubVersion());
+
+  return h('div', { class: 'settings-section' },
+    field('Auto-update',
+      toggleSeg(db.prefs.autoUpdate !== false, on => setPref('autoUpdate', on, paint))),
+    hint('Check for updates on launch and every 6 hours when enabled.'),
+    versionHint,
+    field('Status', h('div', { class: 'hooks-row' }, checkBtn, statusLine)),
+    h('div', { class: 'hooks-row', style: 'margin-top:8px;gap:8px' }, actionBtn, fallback));
+}
+
 /* ---------------- modal shell ---------------- */
 
 interface SettingsSection {
@@ -309,6 +381,7 @@ const SECTIONS: SettingsSection[] = [
   { id: 'terminal', label: 'Terminal', icon: 'term', build: buildTerminalSection },
   { id: 'keys', label: 'Keybindings', icon: 'key', build: buildKeysSection },
   { id: 'notifications', label: 'Notifications', icon: 'bell', build: buildNotificationsSection },
+  { id: 'updates', label: 'Updates', icon: 'gear', build: buildUpdatesSection },
 ];
 
 export function openSettingsModal(): void {

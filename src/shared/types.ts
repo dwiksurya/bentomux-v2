@@ -51,6 +51,8 @@ export interface Prefs {
   notifSound?: boolean;
   /* remote monitor (phone browser); absent = disabled */
   remote?: RemotePrefs;
+  /* auto-update; absent = enabled */
+  autoUpdate?: boolean;
 }
 
 export interface RemotePrefs {

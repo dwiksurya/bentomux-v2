@@ -1308,3 +1308,9 @@ body:not(.pane-hidden) .titlebar.has-tabs .top-tools{display:flex!important}
 :root.dark.palette-eink .diff-line.diff-add .sign{color:#ffffff}
 :root.dark.palette-eink .diff-line.diff-del{background:rgba(255,255,255,.05)}
 
+
+/* ---------------- update banner ---------------- */
+.update-banner{position:fixed;bottom:16px;right:16px;z-index:900;display:flex;align-items:center;gap:8px;padding:10px 12px;background:var(--surface);border:1px solid var(--line);border-radius:10px;box-shadow:0 4px 16px rgba(0,0,0,.12);font-size:13px;color:var(--ink)}
+.update-banner[hidden]{display:none}
+.update-banner-msg{flex:1;min-width:0}
+.update-banner .btn{flex:0 0 auto}

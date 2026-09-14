@@ -6,6 +6,9 @@
   "permissions": [
     "core:default",
     "core:window:default",
-    "core:event:default"
+    "core:event:default",
+    "updater:default",
+    "process:allow-restart",
+    "opener:default"
   ]
 }

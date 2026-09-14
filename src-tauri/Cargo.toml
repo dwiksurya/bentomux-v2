@@ -42,6 +42,9 @@ serde_yaml = "0.9"
 toml = "0.8"
 # manifest rule matching (screen/line regexes)
 regex = "1"
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
+tauri-plugin-opener = "2"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = ["Win32_System_Pipes", "Win32_Storage_FileSystem"] }

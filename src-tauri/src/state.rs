@@ -93,6 +93,8 @@ pub struct Prefs {
     pub notif_sound: Option<bool>,
     /* remote monitor (phone browser); absent = disabled */
     pub remote: Option<RemotePrefs>,
+    /* auto-update; absent = enabled */
+    pub auto_update: Option<bool>,
 }
 
 impl Default for Prefs {
@@ -112,6 +114,7 @@ impl Default for Prefs {
             notif_enabled: None,
             notif_sound: None,
             remote: None,
+            auto_update: None,
         }
     }
 }
