@@ -89,6 +89,7 @@ jobs:
         shell: bash
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          CLOUDFLARED_ALL_MACOS_ARCHS: ${{ runner.os == 'macOS' && '1' || '' }}
         run: |
           # Validate signing key before use — non-empty but malformed base64 causes a
           # deep Tauri failure; catch it early so the error is obvious.
