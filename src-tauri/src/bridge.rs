@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 
 use serde::Serialize;
-use tauri::{Emitter, Manager};
+use tauri::{path::BaseDirectory, Emitter, Manager};
 
 use crate::bridge_config::bridge_address;
 use crate::pty::PtyManager;
@@ -84,9 +84,9 @@ static SEQ: AtomicU64 = AtomicU64::new(0);
 /* absolute path of the hook CLI agents execute — unpacked next to the
    binary as a Tauri resource (packaged equivalent of process.resourcesPath) */
 pub fn hook_script_path(app: &tauri::AppHandle) -> String {
-    /* packaged: the resource bundle (electron's process.resourcesPath) */
-    if let Ok(dir) = app.path().resource_dir() {
-        let bundled = dir.join("bentomux-hook.cjs");
+    /* packaged: declared as `../resources/bentomux-hook.cjs`, so the bundler
+       stores it under `_up_/resources/` — resolve() applies that rewrite */
+    if let Ok(bundled) = app.path().resolve("../resources/bentomux-hook.cjs", BaseDirectory::Resource) {
         if bundled.is_file() {
             return bundled.to_string_lossy().into_owned();
         }
@@ -94,11 +94,9 @@ pub fn hook_script_path(app: &tauri::AppHandle) -> String {
     /* dev: resource_dir may not contain the bundled resources yet, so fall
        back to the project's resources/ folder (electron's
        app.getAppPath()/resources in dev) */
-    if let Ok(manifest) = std::env::var("CARGO_MANIFEST_DIR") {
-        let dev = std::path::Path::new(&manifest).join("../resources/bentomux-hook.cjs");
-        if dev.is_file() {
-            return dev.to_string_lossy().into_owned();
-        }
+    let dev = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../resources/bentomux-hook.cjs");
+    if dev.is_file() {
+        return dev.to_string_lossy().into_owned();
     }
     "bentomux-hook.cjs".to_string()
 }

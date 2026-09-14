@@ -62,11 +62,20 @@ use std::os::unix::fs::PermissionsExt;
 
 #[cfg(unix)]
 fn path_dirs() -> Vec<String> {
-    (std::env::var("PATH").unwrap_or_default())
+    let mut dirs: Vec<String> = (std::env::var("PATH").unwrap_or_default())
         .split(':')
         .map(|d| d.trim().to_string())
         .filter(|d| !d.is_empty())
-        .collect()
+        .collect();
+    /* a GUI-launched app inherits launchd's minimal PATH, so the homebrew /
+       /usr/local installs the "not found on PATH" message points at are
+       otherwise invisible */
+    for extra in ["/usr/local/bin", "/opt/homebrew/bin"] {
+        if !dirs.iter().any(|d| d == extra) {
+            dirs.push(extra.to_string());
+        }
+    }
+    dirs
 }
 
 /* lowercase filename → full path of its FIRST matching dir (PATH order) */
@@ -284,6 +293,16 @@ mod tests {
     #[test]
     fn test_find_on_path_miss_is_none() {
         assert_eq!(find_on_path("definitely-not-a-real-tool-xyz"), None);
+    }
+
+    /* packaged apps launched from Finder/Dock inherit launchd's minimal PATH;
+       the standard unix install dirs must still be scanned */
+    #[cfg(unix)]
+    #[test]
+    fn test_path_dirs_includes_standard_install_dirs() {
+        let dirs = path_dirs();
+        assert!(dirs.iter().any(|d| d == "/usr/local/bin"), "{dirs:?}");
+        assert!(dirs.iter().any(|d| d == "/opt/homebrew/bin"), "{dirs:?}");
     }
 
     #[test]

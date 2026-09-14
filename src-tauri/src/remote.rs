@@ -588,11 +588,20 @@ fn cloudflared_resource_path(resource_dir: &Path, target: &str, windows: bool) -
     resource_dir.join("cloudflared").join(target).join(if windows { "cloudflared.exe" } else { "cloudflared" })
 }
 
+/* the bundler declares this resource as `../resources/cloudflared/...` and stores
+   `..` components as `_up_`, so the packaged lookup has to go through
+   `PathResolver::resolve` (which applies the same rewrite). Joining
+   `resource_dir()` directly lands on `Resources/cloudflared/...` — a path that
+   never exists in an installed build — and the tunnel then reports
+   "cloudflared is not bundled for this platform". */
+fn cloudflared_resource_rel(target: &str, windows: bool) -> String {
+    format!("../resources/cloudflared/{target}/{}", if windows { "cloudflared.exe" } else { "cloudflared" })
+}
+
 fn bundled_cloudflared(app: &tauri::AppHandle) -> Option<String> {
     let target = cloudflared_target()?;
     let is_win = cfg!(target_os = "windows");
-    if let Ok(dir) = app.path().resource_dir() {
-        let p = cloudflared_resource_path(&dir, target, is_win);
+    if let Ok(p) = app.path().resolve(cloudflared_resource_rel(target, is_win), BaseDirectory::Resource) {
         if p.is_file() {
             return Some(p.to_string_lossy().into_owned());
         }
@@ -830,6 +839,15 @@ mod tests {
         let root = Path::new("/resources");
         assert_eq!(cloudflared_resource_path(root, "darwin-x86_64", false), Path::new("/resources/cloudflared/darwin-x86_64/cloudflared"));
         assert_eq!(cloudflared_resource_path(root, "windows-x86_64", true), Path::new("/resources/cloudflared/windows-x86_64/cloudflared.exe"));
+    }
+
+    /* the packaged lookup must stay `../`-relative: the bundler rewrites the
+       leading `..` to `_up_` (tauri_utils::resources::resource_relpath)
+       because tauri.conf.json points at the repo-level resources/ dir */
+    #[test]
+    fn bundled_resource_rel_requires_up_prefix_rewrite() {
+        assert_eq!(cloudflared_resource_rel("darwin-x86_64", false), "../resources/cloudflared/darwin-x86_64/cloudflared");
+        assert_eq!(cloudflared_resource_rel("windows-x86_64", true), "../resources/cloudflared/windows-x86_64/cloudflared.exe");
     }
 }
 
