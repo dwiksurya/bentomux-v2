@@ -90,14 +90,18 @@ jobs:
       - name: Validate packaged resources and sizes
         run: node scripts/verify-bundle.mjs "$BUNDLE_DIR"
 
+      # One filename per runner: the manifest job downloads every checksum
+      # artifact into a single directory (merge-multiple), where three files all
+      # called checksums.sha256 would overwrite each other and leave only the
+      # last runner's hashes behind.
       - name: Generate checksums
         shell: bash
         run: |
           mkdir -p dist
           if command -v sha256sum >/dev/null 2>&1; then HASHER=sha256sum; else HASHER="shasum -a 256"; fi
           find "$BUNDLE_DIR" -type f \( -name '*.dmg' -o -name '*.AppImage' -o -name '*.deb' -o -name '*.msi' -o -name '*-setup.exe' \) -print0 \
-            | sort -z | xargs -0 $HASHER > dist/checksums.sha256
-          cat dist/checksums.sha256
+            | sort -z | xargs -0 $HASHER > "dist/checksums-${RUNNER_OS}.sha256"
+          cat "dist/checksums-${RUNNER_OS}.sha256"
 
       - name: Upload packaged artifact
         uses: actions/upload-artifact@v4
@@ -115,7 +119,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: bentomux-checksums-${{ runner.os }}
-          path: dist/checksums.sha256
+          path: dist/checksums-*.sha256
           if-no-files-found: error
 
       - name: Publish release
@@ -146,6 +150,7 @@ jobs:
 
       - name: Build latest.json and the Homebrew cask
         run: |
+          ls -l dist/checksums
           node scripts/release-manifest.mjs --selftest
           mkdir -p dist/out
           node scripts/release-manifest.mjs --tag "$GITHUB_REF_NAME" \
