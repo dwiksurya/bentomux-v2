@@ -36,6 +36,9 @@ function Invoke-Installer([string]$Manifest) {
     $shell = if (Get-Command powershell.exe -ErrorAction SilentlyContinue) { 'powershell.exe' } else { 'pwsh' }
     $output = & $shell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'installers/install.ps1') `
         -ManifestUrl $Manifest -DryRun 2>&1 | Out-String
+    # Out-String joins with CRLF on Windows, and .NET's `$` does not match before
+    # a `\r`, so an anchored assertion would pass on Linux/macOS and fail here.
+    $output = $output -replace "`r`n", "`n"
     return [pscustomobject]@{ Output = $output; ExitCode = $LASTEXITCODE }
 }
 
