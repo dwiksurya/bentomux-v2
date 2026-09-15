@@ -55,5 +55,8 @@ windows = { version = "0.58", features = ["Win32_System_Pipes", "Win32_Storage_F
 [profile.release]
 codegen-units = 1
 lto = true
-opt-level = "s"
+# speed profile: the previous "s" (size) setting cost throughput on the hot
+# paths (vt100 screen parsing, pty chunk decode, sysinfo walks) for a bundle
+# that is a rounding error next to the webview it ships with
+opt-level = 3
 strip = true
