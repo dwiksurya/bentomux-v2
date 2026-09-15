@@ -136,7 +136,6 @@ function wireXtermEvents(term: Terminal, tabId: string): void {
   term.attachCustomKeyEventHandler(e => {
     /* Ctrl+C / Cmd+C dengan selection aktif → copy; tanpa selection → biarkan SIGINT lewat */
     const isCopy = (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c' && term.hasSelection();
-    const isPaste = (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v' && e.type === 'keydown';
     if (isCopy) {
       const sel = term.getSelection();
       if (sel) {
@@ -146,17 +145,65 @@ function wireXtermEvents(term: Terminal, tabId: string): void {
       }
       return false;
     }
-    if (isPaste) {
+    /* Shift+Enter → kirim newline literal (\n) bukan carriage return, supaya
+       AI CLI tools (Claude, aider, dll.) bisa insert baris baru tanpa submit */
+    if (e.shiftKey && e.key === 'Enter' && e.type === 'keydown') {
       e.preventDefault();
-      void navigator.clipboard.readText().then(text => {
-        if (text) window.bentomux.writeTab(tabId, text);
-      });
+      window.bentomux.writeTab(tabId, '\n');
       return false;
     }
     return true;
   });
   term.onData(d => window.bentomux.writeTab(tabId, d));
   term.onResize(({ cols, rows }) => window.bentomux.resizeTab(tabId, cols, rows));
+  wireClipboardPaste(term, tabId);
+}
+
+/* Handle Cmd+V paste of files and images from clipboard.
+   Uses the textarea `paste` event (clipboardData) — no permission prompt. */
+function wireClipboardPaste(term: Terminal, tabId: string): void {
+  /* term.textarea is available after term.open() */
+  const textarea = term.textarea;
+  if (!textarea) return;
+  textarea.addEventListener('paste', e => {
+    const cd = e.clipboardData;
+    if (!cd) return;
+
+    /* 1. Files (e.g. dragged from Finder then Cmd+C → Cmd+V, or copied files) */
+    if (cd.files.length > 0) {
+      e.preventDefault();
+      e.stopPropagation();
+      const paths = Array.from(cd.files).map(f => {
+        const p = (f as File & { path?: string }).path || f.name;
+        return p.includes(' ') ? '"' + p + '"' : p;
+      });
+      window.bentomux.writeTab(tabId, paths.join(' '));
+      return;
+    }
+
+    /* 2. Image in clipboard (screenshot, copied image) → save to temp PNG */
+    const imageItem = Array.from(cd.items).find(it => it.type.startsWith('image/'));
+    if (imageItem) {
+      e.preventDefault();
+      e.stopPropagation();
+      const blob = imageItem.getAsFile();
+      if (!blob) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        const dataUrl = reader.result as string;
+        /* strip "data:image/png;base64," prefix */
+        const b64 = dataUrl.split(',')[1];
+        if (!b64) return;
+        void window.bentomux.saveClipboardImage(b64).then(path => {
+          const quoted = path.includes(' ') ? '"' + path + '"' : path;
+          window.bentomux.writeTab(tabId, quoted);
+        });
+      };
+      reader.readAsDataURL(blob);
+      return;
+    }
+    /* plain text: let xterm handle it natively */
+  });
 }
 
 function markFocusedPane(host: HTMLElement, tabId: string): void {
@@ -178,6 +225,7 @@ function wireFocusIn(host: HTMLElement, tabId: string): void {
     markFocusedPane(host, tabId);
   });
 }
+
 
 function ensureLive(tabId: string): Live {
   console.log('[DEBUG ensureLive] Called with tabId:', tabId);
