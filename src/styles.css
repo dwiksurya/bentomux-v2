@@ -731,6 +731,7 @@ html.drag-on, html.drag-on *{cursor:grabbing !important;user-select:none !import
    between them (pad + divider + pad). content-box keeps FitAddon's
    measurements equal to the usable text area. */
 .terminal-host{position:absolute;inset:0}
+.terminal-host.drop-active{outline:2px dashed var(--accent);outline-offset:-3px}
 .mux-body.split .terminal-host{margin:var(--term-pad);padding:var(--term-pad-in);border:1px solid var(--line);border-radius:6px;box-sizing:content-box;transition:border-color .12s}
 .terminal-page .mux-body{position:relative;margin:0}
 .xterm,.xterm .xterm-viewport,.xterm .xterm-screen{border-radius:0}

@@ -127,6 +127,7 @@ function createXterm(tabId: string): { term: Terminal; fit: FitAddon; host: HTML
 
   wireXtermEvents(term, tabId);
   wireFocusIn(host, tabId);
+  wireFileDrop(host, tabId);
   const result = { term, fit, host };
   console.log('[DEBUG createXterm] Returning:', result);
   return result;
@@ -226,6 +227,33 @@ function wireFocusIn(host: HTMLElement, tabId: string): void {
   });
 }
 
+/* Drag-and-drop files/images onto terminal → write absolute path(s) to PTY.
+   Multiple files separated by spaces; paths with spaces are quoted. */
+function wireFileDrop(host: HTMLElement, tabId: string): void {
+  host.addEventListener('dragover', e => {
+    if (!e.dataTransfer?.types.includes('Files')) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+    host.classList.add('drop-active');
+  });
+  host.addEventListener('dragleave', e => {
+    /* only clear when leaving the host itself, not a child */
+    if (!host.contains(e.relatedTarget as Node)) host.classList.remove('drop-active');
+  });
+  host.addEventListener('drop', e => {
+    e.preventDefault();
+    host.classList.remove('drop-active');
+    const files = e.dataTransfer?.files;
+    if (!files || files.length === 0) return;
+    const paths = Array.from(files).map(f => {
+      /* In Tauri/WebKit the File object exposes the real FS path via .path
+         (non-standard but available in Tauri's WebView). Fall back to name. */
+      const p = (f as File & { path?: string }).path || f.name;
+      return p.includes(' ') ? '"' + p + '"' : p;
+    });
+    window.bentomux.writeTab(tabId, paths.join(' '));
+  });
+}
 
 function ensureLive(tabId: string): Live {
   console.log('[DEBUG ensureLive] Called with tabId:', tabId);
