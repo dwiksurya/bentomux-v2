@@ -66,7 +66,15 @@ fn handle_osc(state: &mut ScreenState, payload: &[u8]) {
 /* Feed a raw pty chunk: split out OSC sequences (recording title/progress),
    forward the remaining bytes to the vt100 renderer. */
 fn feed(state: &mut ScreenState, chunk: &[u8]) {
+    /* Fast path: nothing to split out, so hand the bytes straight to vt100
+       with no copy. Most chunks of a normal shell session take this path. */
+    if state.osc_carry.is_empty() && !chunk.contains(&0x1b) {
+        state.term.process(chunk);
+        return;
+    }
+
     let mut stream: Vec<u8> = std::mem::take(&mut state.osc_carry);
+    stream.reserve(chunk.len());
     stream.extend_from_slice(chunk);
 
     let mut render = Vec::with_capacity(stream.len());
@@ -99,8 +107,16 @@ fn feed(state: &mut ScreenState, chunk: &[u8]) {
                 }
             }
         } else {
-            render.push(stream[i]);
+            /* copy plain bytes up to the next escape in one go. The leading
+               byte is consumed unconditionally: it is either a non-escape or
+               an ESC that is not the start of an OSC (e.g. a CSI colour), and
+               re-entering the loop on it without advancing would spin. */
+            let start = i;
             i += 1;
+            while i < stream.len() && stream[i] != 0x1b {
+                i += 1;
+            }
+            render.extend_from_slice(&stream[start..i]);
         }
     }
     if !render.is_empty() {
@@ -308,15 +324,14 @@ fn update(id: &str, chunk: &[u8]) {
         last_data_at: 0,
         osc_carry: Vec::new(),
     });
-    let before_screen = entry.term.screen().contents();
-    let before_title = entry.osc_title.clone();
-    let before_progress = entry.osc_progress.clone();
+    /* `last_data_at` only feeds the "did the agent write anything recently"
+       activity pulse, so the two full-viewport `contents()` renders this
+       used to build and compare per chunk are unnecessary — any visible
+       byte is output activity. Escape-only chunks still reach feed(), since
+       they can repaint the screen (clear, cursor moves) without a printable
+       byte. */
     feed(entry, chunk);
-    if has_visible_activity(chunk)
-        && (before_screen != entry.term.screen().contents()
-        || before_title != entry.osc_title
-        || before_progress != entry.osc_progress)
-    {
+    if has_visible_activity(chunk) {
         entry.last_data_at = now_ms();
     }
 }
@@ -327,7 +342,8 @@ fn remove(id: &str) {
 
 /* ---- wiring: subscribe to the pty data/exit broadcasts and maintain the
    store. One thread per subject; each runs for the lifetime of the process.
-   Broadcast receivers don't offer a blocking recv, so we poll try_recv. */
+   Both run on plain std threads, so they block on the receiver rather than
+   spinning a try_recv/sleep poll. */
 pub fn init_screen_feed(
     data_rx: broadcast::Receiver<(String, String)>,
     exit_rx: broadcast::Receiver<(String, i32)>,
@@ -335,26 +351,20 @@ pub fn init_screen_feed(
     std::thread::spawn(move || {
         let mut rx = data_rx;
         loop {
-            match rx.try_recv() {
+            match rx.blocking_recv() {
                 Ok((id, chunk)) => update(&id, chunk.as_bytes()),
-                Err(broadcast::error::TryRecvError::Empty) => {
-                    std::thread::sleep(std::time::Duration::from_millis(2));
-                }
-                Err(broadcast::error::TryRecvError::Lagged(_)) => continue,
-                Err(broadcast::error::TryRecvError::Closed) => break,
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => break,
             }
         }
     });
     std::thread::spawn(move || {
         let mut rx = exit_rx;
         loop {
-            match rx.try_recv() {
+            match rx.blocking_recv() {
                 Ok((id, _)) => remove(&id),
-                Err(broadcast::error::TryRecvError::Empty) => {
-                    std::thread::sleep(std::time::Duration::from_millis(2));
-                }
-                Err(broadcast::error::TryRecvError::Lagged(_)) => continue,
-                Err(broadcast::error::TryRecvError::Closed) => break,
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => break,
             }
         }
     });
@@ -403,6 +413,34 @@ mod tests {
         let lines = s.term.screen().contents().lines().map(|l| l.trim_end().to_string()).collect::<Vec<_>>();
         assert!(lines.iter().any(|l| l == "plaintext"));
         /* no stray OSC bytes leaked into the render */
+        assert!(!lines.iter().any(|l| l.contains('\u{1b}')));
+    }
+
+    /* the feed() fast path and the run-copy branch must not stall or drop
+       bytes on non-OSC escapes (CSI colour, lone trailing ESC from a chunk
+       split mid-sequence) */
+    #[test]
+    fn csi_and_split_escapes_pass_through_to_the_renderer() {
+        let mut s = ScreenState {
+            term: Parser::new(ROWS, COLS, SCROLLBACK),
+            osc_title: String::new(),
+            osc_progress: String::new(),
+            last_data_at: 0,
+            osc_carry: Vec::new(),
+        };
+        /* colour CSI around text, then a bare ESC at the very end of a chunk */
+        feed(&mut s, b"\x1b[31mred\x1b[0m");
+        feed(&mut s, b"tail\x1b");
+        /* the split ESC is completed by the next chunk's CSI */
+        feed(&mut s, b"[1m bold");
+        let lines = s
+            .term
+            .screen()
+            .contents()
+            .lines()
+            .map(|l| l.trim_end().to_string())
+            .collect::<Vec<_>>();
+        assert!(lines.iter().any(|l| l == "redtail bold"), "got {lines:?}");
         assert!(!lines.iter().any(|l| l.contains('\u{1b}')));
     }
 
