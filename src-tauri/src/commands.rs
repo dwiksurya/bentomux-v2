@@ -720,6 +720,15 @@ pub fn win_close(window: tauri::Window) {
     let _ = window.close();
 }
 
+/* Kill cloudflared and the remote HTTP server before the NSIS/MSI installer
+   overwrites cloudflared.exe. Called by the renderer immediately before
+   tauri-plugin-updater's downloadAndInstall() on Windows. */
+#[tauri::command]
+pub fn shutdown_for_update() {
+    crate::remote::stop_tunnel();
+    crate::remote::stop_remote();
+}
+
 /* Save base64-encoded image bytes to a temp file and return its path.
    The renderer calls this when the user pastes an image from clipboard. */
 #[tauri::command]
