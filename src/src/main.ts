@@ -23,6 +23,12 @@ import { initAgentEvents } from './views/agent-events';
 import { initAutoUpdate, updateStatus, onUpdateChange } from './updates';
 document.documentElement.classList.toggle('macos', /Mac/.test(navigator.platform));
 
+/* Suppress native browser context menu everywhere except inside
+   .terminal-page which wires its own contextmenu handler. */
+document.addEventListener('contextmenu', e => {
+  if (!(e.target as Element).closest('.terminal-page')) e.preventDefault();
+});
+
 const MIN_SIDEBAR_WIDTH = 248;
 const MAX_SIDEBAR_RATIO = 0.5;
 
