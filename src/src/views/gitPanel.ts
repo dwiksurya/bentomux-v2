@@ -16,7 +16,15 @@ import type {
 interface PanelState {
   status: GitStatusResult | null;
   remote: GitRemoteInfo | null;
+  /* a refresh (mount or button) is in flight and the panel shows a spinner */
+  loading: boolean;
+  /* any git pass is in flight, including silent background polls */
+  inflight: boolean;
 }
+
+/* the panel is mounted once per (open, workspace) pair and then polls itself,
+   so the sidebar's 1 Hz re-render no longer re-runs the git shellouts */
+const PANEL_POLL_MS = 4000;
 
 function activeWsId(): string | null {
   return db.activeWorkspaceId;
@@ -51,7 +59,13 @@ function buildHeader(state: PanelState, paint: () => void): HTMLElement {
     h('div', { class: 'grow' },
       h('b', {}, 'Git · ' + name),
       h('div', { class: 'muted', style: 'margin-top:2px' }, state.status?.isRepo === false ? 'Not a git repository' : (branch ? 'On ' + branch : 'Detached HEAD'))),
-    h('button', { class: 'tbtn', title: 'Refresh', onclick: () => void refresh(state, paint), 'aria-label': 'Refresh' },
+    h('button', {
+      class: 'tbtn',
+      title: state.loading ? 'Refreshing…' : 'Refresh',
+      onclick: () => void refresh(state, paint),
+      'aria-label': 'Refresh',
+      disabled: state.loading,
+    },
       h('span', { html: '↻', style: 'font-size:14px' })));
 }
 
@@ -60,7 +74,9 @@ function buildFilesList(state: PanelState): HTMLElement {
   const wrap = h('div', { class: 'git-section git-files' },
     h('div', { class: 'git-section-h' },
       h('span', { class: 'grow' }, 'Changes'),
-      h('span', { class: 'muted' }, (state.status?.entries.length ?? 0) + ' files')),
+      h('span', { class: 'muted' }, state.loading
+        ? 'Refreshing…'
+        : (state.status?.entries.length ?? 0) + ' files')),
     list);
 
   if (!state.status) {
@@ -100,25 +116,38 @@ function fileRow(entry: GitStatusEntry, wsId: string): HTMLElement {
 
 /* ---------------- data flow ---------------- */
 
-async function refresh(state: PanelState, paint: () => void): Promise<void> {
-  const wsId = activeWsId();
-  if (!wsId) {
-    state.status = { isRepo: false, branch: null, ahead: 0, behind: 0, entries: [], hasUntracked: false };
-    state.remote = { isRepo: false, remote: null, defaultBranch: null };
-    void refreshChangesPill();
+interface RefreshOpts {
+  /* background poll: no spinner, and no repaint when the data did not move,
+     so the file list keeps its scroll position while the panel sits idle */
+  silent?: boolean;
+}
+
+async function refresh(state: PanelState, paint: () => void, opts: RefreshOpts = {}): Promise<void> {
+  if (state.inflight) return; /* one git pass at a time per panel */
+  state.inflight = true;
+  const before = JSON.stringify([state.status, state.remote]);
+  if (!opts.silent) {
+    state.loading = true;
     paint();
-    return;
   }
   try {
-    const [s, r] = await Promise.all([window.bentomux.gitStatus(wsId), window.bentomux.gitRemoteInfo(wsId)]);
-    state.status = s;
-    state.remote = r;
+    const wsId = activeWsId();
+    if (!wsId) {
+      state.status = { isRepo: false, branch: null, ahead: 0, behind: 0, entries: [], hasUntracked: false };
+      state.remote = { isRepo: false, remote: null, defaultBranch: null };
+    } else {
+      const [s, r] = await Promise.all([window.bentomux.gitStatus(wsId), window.bentomux.gitRemoteInfo(wsId)]);
+      state.status = s;
+      state.remote = r;
+    }
     void refreshChangesPill();
-    paint();
   } catch (e: unknown) {
     console.error('gitPanel refresh failed', e);
-    paint();
+  } finally {
+    state.inflight = false;
+    state.loading = false;
   }
+  if (!opts.silent || JSON.stringify([state.status, state.remote]) !== before) paint();
 }
 
 /* ---------------- Changes pill ----------------
@@ -152,11 +181,19 @@ export async function refreshChangesPill(): Promise<void> {
 
 /* ---------------- mount ---------------- */
 
+/* the node the sidebar currently has mounted; `isConnected` is the invalidation
+   signal — the sidebar clears the slot when the panel is closed, so a detached
+   root means "rebuild (and re-fetch) on the next open" */
+let mounted: { wsId: string | null; root: HTMLElement } | null = null;
+
 export function gitPanelPage(): HTMLElement {
+  const wsId = activeWsId();
+  if (mounted && mounted.wsId === wsId && mounted.root.isConnected) return mounted.root;
+
   const root = h('div', { class: 'git-panel-root' });
 
   const state: PanelState = {
-    status: null, remote: null,
+    status: null, remote: null, loading: false, inflight: false,
   };
 
   function paint(): void {
@@ -168,7 +205,16 @@ export function gitPanelPage(): HTMLElement {
     );
   }
 
+  mounted = { wsId, root };
   paint();
   void refresh(state, paint);
+
+  /* the panel owns its own freshness now that it is not re-mounted: slow poll
+     while it is on screen, self-clearing once the sidebar drops the node */
+  const poll = window.setInterval(() => {
+    if (!root.isConnected) { window.clearInterval(poll); return; }
+    void refresh(state, paint, { silent: true });
+  }, PANEL_POLL_MS);
+
   return root;
 }

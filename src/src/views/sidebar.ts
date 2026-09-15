@@ -379,7 +379,18 @@ function renderGitPanel(): void {
   document.body.classList.toggle('git-panel-open', ui.gitPanelOpen);
   const slot = $('#gitPanelBody');
   if (!slot) return;
-  if (!ui.gitPanelOpen) return;
-  slot.innerHTML = '';
-  slot.append(gitPanelPage());
+  if (!ui.gitPanelOpen) {
+    /* drop the mounted panel so re-opening fetches instead of showing the
+       snapshot from the previous time the panel was up */
+    slot.innerHTML = '';
+    return;
+  }
+  /* gitPanelPage() returns the same node while the active workspace is
+     unchanged, so the 1 Hz runtime-status re-render does not rebuild the
+     panel (and re-run its git shellouts) underneath the user. */
+  const panel = gitPanelPage();
+  if (slot.firstElementChild !== panel) {
+    slot.innerHTML = '';
+    slot.append(panel);
+  }
 }

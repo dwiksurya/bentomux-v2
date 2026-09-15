@@ -442,34 +442,49 @@ pub fn pty_resize(id: String, cols: u16, rows: u16, pty: State<'_, PtyManager>) 
 
 /* ---------------- git ---------------- */
 
-#[tauri::command]
-pub fn git_status(workspace_id: String, state: State<'_, AppStateManager>) -> Result<crate::git::GitStatusResult, String> {
-    let path = workspace_path(&workspace_id, &state)?;
-    Ok(crate::git::status(&path))
+/* every git op shells out and blocks (`status -uall` walks the whole worktree,
+   `push` waits on the network for up to 120s). A non-async #[tauri::command]
+   runs on the app main thread, so the WebView froze until git returned; these
+   hop to the blocking pool instead and the renderer paints its loading state
+   while the invoke is in flight. */
+async fn git_off_main<T, F>(f: F) -> Result<T, String>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(f)
+        .await
+        .map_err(|e| format!("git task failed: {}", e))
 }
 
 #[tauri::command]
-pub fn git_diff(workspace_id: String, path: Option<String>, state: State<'_, AppStateManager>) -> Result<crate::git::GitDiffResult, String> {
+pub async fn git_status(workspace_id: String, state: State<'_, AppStateManager>) -> Result<crate::git::GitStatusResult, String> {
+    let path = workspace_path(&workspace_id, &state)?;
+    git_off_main(move || crate::git::status(&path)).await
+}
+
+#[tauri::command]
+pub async fn git_diff(workspace_id: String, path: Option<String>, state: State<'_, AppStateManager>) -> Result<crate::git::GitDiffResult, String> {
     let ws_path = workspace_path(&workspace_id, &state)?;
-    Ok(crate::git::diff(&ws_path, path.as_deref()))
+    git_off_main(move || crate::git::diff(&ws_path, path.as_deref())).await
 }
 
 #[tauri::command]
-pub fn git_diff_stat(workspace_id: String, state: State<'_, AppStateManager>) -> Result<crate::git::GitDiffStatResult, String> {
+pub async fn git_diff_stat(workspace_id: String, state: State<'_, AppStateManager>) -> Result<crate::git::GitDiffStatResult, String> {
     let path = workspace_path(&workspace_id, &state)?;
-    Ok(crate::git::diff_stat(&path))
+    git_off_main(move || crate::git::diff_stat(&path)).await
 }
 
 #[tauri::command]
-pub fn git_push(workspace_id: String, set_upstream: bool, state: State<'_, AppStateManager>) -> Result<crate::git::GitCommandResult, String> {
+pub async fn git_push(workspace_id: String, set_upstream: bool, state: State<'_, AppStateManager>) -> Result<crate::git::GitCommandResult, String> {
     let path = workspace_path(&workspace_id, &state)?;
-    Ok(crate::git::push(&path, set_upstream))
+    git_off_main(move || crate::git::push(&path, set_upstream)).await
 }
 
 #[tauri::command]
-pub fn git_remote_info(workspace_id: String, state: State<'_, AppStateManager>) -> Result<crate::git::GitRemoteInfo, String> {
+pub async fn git_remote_info(workspace_id: String, state: State<'_, AppStateManager>) -> Result<crate::git::GitRemoteInfo, String> {
     let path = workspace_path(&workspace_id, &state)?;
-    Ok(crate::git::remote_info(&path))
+    git_off_main(move || crate::git::remote_info(&path)).await
 }
 
 #[tauri::command]
