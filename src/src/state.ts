@@ -4,6 +4,7 @@ import type { PaneNode } from '../shared/split-tree';
 
 export type Route =
   | { view: 'terminal'; tabId: string }
+  | { view: 'welcome' }
   | { view: 'agents' }
   | { view: 'agentDetail'; agentId: string; tab: 'model' | 'memory' | 'skills' | 'mcp' }
   | { view: 'diff'; workspaceId: string; path: string };
@@ -20,7 +21,7 @@ export interface TabEntry {
 }
 
 export const ui = {
-  route: { view: 'agents' } as Route,
+  route: { view: 'welcome' } as Route,
   tabs: [] as TabEntry[],
   activeTab: null as string | null,
   sel: null as string | null,

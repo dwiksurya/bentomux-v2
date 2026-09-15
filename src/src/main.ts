@@ -15,6 +15,7 @@ import { registerRenderers, render } from './render';
 import { renderTabs, activate, stepHistory, registerRestoredTab } from './views/tabs';
 import { renderSidebar, toggleGitPanel } from './views/sidebar';
 import { agentsPage, agentDetailPage } from './views/agents';
+import { welcomePage } from './views/welcome';
 import { initTerminalEvents, terminalPage, applyTerminalFont } from './views/terminal';
 import { initKeyboard } from './keyboard';
 import { diffPage } from './views/diff';
@@ -88,9 +89,13 @@ function renderContentInner(route: Route): void {
     const start = entry && entry.route.view === 'terminal' ? (entry.tree ?? entry.route.tabId) : route.tabId;
     const result = terminalPage(start);
     body.append(exists ? result : h('div', { class: 'page' }, h('p', {}, 'Terminal not found.')));
-  } else if (route.view === 'agents') {
+  } else if (route.view === 'welcome') {
     body.innerHTML = '';
-    body.append(agentsPage());
+    body.append(welcomePage());
+  } else if (route.view === 'agents') {
+    ui.route = { view: 'welcome' };
+    body.innerHTML = '';
+    body.append(welcomePage());
   } else if (route.view === 'agentDetail') {
     body.innerHTML = '';
     body.append(agentDetailPage(route.agentId, route.tab));
@@ -285,8 +290,9 @@ function subscribeRuntime(): void {
 }
 
 function restoreInitialView(restored: import('../shared/types').TabRec[]): void {
-  if (restored.length) activate('term:' + restored[0].id);
-  else render();
+  if (restored.length) { activate('term:' + restored[0].id); return; }
+  if (!db.workspaces.length) { ui.route = { view: 'welcome' }; }
+  render();
 }
 
 function logSmokeIfRequested(): void {

@@ -158,7 +158,7 @@ export function diffPage(workspaceId: string, filePath: string): HTMLElement {
      it was the last one */
   const onBack = (): void => {
     if (ui.activeTab && ui.route.view === 'diff') void closeTab(ui.activeTab);
-    else go({ view: 'agents' });
+    else go({ view: 'welcome' });
   };
   wrap.append(buildHeader(filePath, onBack), slot);
 

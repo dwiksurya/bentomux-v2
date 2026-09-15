@@ -273,7 +273,7 @@ function commitTitle(t: TabEntry, value: string): void {
 
 function goMemory(): void {
   ui.activeTab = null;
-  ui.route = { view: 'agents' };
+  ui.route = { view: 'welcome' };
   /* render directly — setRoute skips tab creation for non-terminal routes */
   render();
 }

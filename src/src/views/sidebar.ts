@@ -140,7 +140,7 @@ function ensureSomeActiveTab(): void {
   const next = ui.tabs[0];
   if (next) { ui.activeTab = next.id; ui.route = next.route; return; }
   ui.activeTab = null;
-  ui.route = { view: 'agents' };
+  ui.route = { view: 'welcome' };
 }
 
 function confirmRemove(ws: { id: string; name: string; path: string }): void {
