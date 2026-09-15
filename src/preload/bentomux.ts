@@ -22,6 +22,7 @@
 
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { getCurrentWebview } from '@tauri-apps/api/webview';
 import type {
   AgentApprovalRequest,
   AgentConfigView,
@@ -29,6 +30,7 @@ import type {
   AgentHooksStatus,
   AgentInfo,
   AppState,
+  FileDropEvent,
   GitCommandResult,
   GitDiffResult,
   GitDiffStatResult,
@@ -56,9 +58,44 @@ function subscribe<T>(event: string, cb: (payload: T) => void): () => void {
   };
 }
 
+/* wry reports drag positions in different units per platform, and
+   tauri-runtime-wry wraps every one of them in PhysicalPosition without
+   converting:
+     macOS  (wkwebview)  draggingLocation()/frame() → AppKit points, already
+                         flipped to a top-left origin → these ARE CSS pixels
+     Linux  (webkitgtk)  connect_drag_motion x/y → GTK logical units → CSS px
+     Windows (webview2)  ScreenToClient() → physical pixels, needs / DPR
+   Dividing on macOS or Linux would halve the point on a HiDPI screen and
+   drop the path into the wrong pane (or no pane at all). */
+const DROP_POSITION_SCALE = /Win/.test(navigator.platform) ? (window.devicePixelRatio || 1) : 1;
+
 const api = {
   /* clipboard helpers */
-  saveClipboardImage: (data: string) => invoke<string>('clipboard_save_image', { data }),
+  saveTempFile: (name: string, data: string) => invoke<string>('temp_write_file', { name, data }),
+
+  /* native OS drag & drop. Tauri intercepts drops at the window level, so the
+     renderer's HTML5 `drop` event never carries a filesystem path — the only
+     way to learn where a dropped file lives is this webview event. Positions
+     are normalised to CSS pixels so document.elementFromPoint() can be used. */
+  onFileDrop: (cb: (e: FileDropEvent) => void): (() => void) => {
+    let unlisten: UnlistenFn | undefined;
+    void getCurrentWebview().onDragDropEvent(ev => {
+      const p = ev.payload;
+      if (p.type === 'leave') return cb({ type: 'leave', x: 0, y: 0, paths: [] });
+      const scale = DROP_POSITION_SCALE;
+      cb({
+        type: p.type,
+        x: p.position.x / scale,
+        y: p.position.y / scale,
+        paths: p.type === 'over' ? [] : p.paths,
+      });
+    }).then(fn => {
+      unlisten = fn;
+    });
+    return () => {
+      if (unlisten) unlisten();
+    };
+  },
 
   /* window chrome */
   minimize: () => { void invoke('win_minimize'); },

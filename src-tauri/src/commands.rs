@@ -729,22 +729,68 @@ pub fn shutdown_for_update() {
     crate::remote::stop_remote();
 }
 
-/* Save base64-encoded image bytes to a temp file and return its path.
-   The renderer calls this when the user pastes an image from clipboard. */
+/* Stage pasted clipboard bytes as a temp file and return the absolute path.
+   A WebView hands the renderer clipboard files without any filesystem path,
+   so copying the bytes out is the only way a pasted screenshot or file
+   becomes something the shell/agent can actually open. The renderer sends
+   the clipboard's own filename so the extension survives. */
 #[tauri::command]
-pub fn clipboard_save_image(data: String) -> Result<String, String> {
+pub fn temp_write_file(name: String, data: String) -> Result<String, String> {
     use std::io::Write;
     let bytes = base64_decode(&data).map_err(|e| e.to_string())?;
-    let tmp = std::env::temp_dir();
-    let name = format!("bentomux-paste-{}.png", rand::random::<u32>());
-    let path = tmp.join(&name);
+    let path = std::env::temp_dir().join(format!(
+        "bentomux-{}-{}",
+        rand::random::<u32>(),
+        safe_temp_name(&name)
+    ));
     std::fs::File::create(&path)
         .and_then(|mut f| f.write_all(&bytes))
         .map_err(|e| e.to_string())?;
     Ok(path.to_string_lossy().to_string())
 }
 
+/* the name comes from the OS clipboard, i.e. from outside the app: collapse
+   path separators so the result can never climb out of the temp dir, and fall
+   back to a fixed suffix when nothing name-like is left. `create()` may still
+   reject a Windows-reserved name (CON, NUL, a stray ':'), which surfaces as an
+   error and makes the renderer paste the bare name instead of a path. */
+pub(crate) fn safe_temp_name(name: &str) -> String {
+    let flat: String = name
+        .chars()
+        .map(|c| if std::path::is_separator(c) || c == '\0' { '_' } else { c })
+        .collect();
+    let trimmed = flat.trim();
+    if trimmed.is_empty() || trimmed.chars().all(|c| c == '.') {
+        return "paste.bin".to_string();
+    }
+    trimmed.chars().take(120).collect()
+}
+
 fn base64_decode(s: &str) -> Result<Vec<u8>, base64::DecodeError> {
     use base64::Engine;
     base64::engine::general_purpose::STANDARD.decode(s)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::safe_temp_name;
+
+    #[test]
+    fn keeps_extension_and_flattens_traversal() {
+        assert_eq!(safe_temp_name("image.png"), "image.png");
+        assert_eq!(safe_temp_name("Screenshot 2026-09-15 at 12.49.20.png"),
+                   "Screenshot 2026-09-15 at 12.49.20.png");
+        /* separators cannot survive, so the result can never leave temp_dir */
+        assert_eq!(safe_temp_name("../../etc/passwd"), ".._.._etc_passwd");
+        assert_eq!(safe_temp_name("/etc/passwd"), "_etc_passwd");
+        assert!(!safe_temp_name("../../etc/passwd").contains('/'));
+    }
+
+    #[test]
+    fn falls_back_and_caps_length() {
+        assert_eq!(safe_temp_name(""), "paste.bin");
+        assert_eq!(safe_temp_name("..."), "paste.bin");
+        assert_eq!(safe_temp_name("report.pdf").len(), 10);
+        assert_eq!(safe_temp_name(&"a".repeat(500)).chars().count(), 120);
+    }
 }

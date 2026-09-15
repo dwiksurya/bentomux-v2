@@ -10,6 +10,7 @@ import '@xterm/xterm/css/xterm.css';
 import { h, $ } from '../dom';
 import { openContextMenu, type MenuEntry } from '../components/menu';
 import { leafIds, type PaneNode } from '../../shared/split-tree';
+import type { FileDropEvent } from '../../shared/types';
 import { db } from '../store';
 import { splitTerminalPane, closeTerminalPane, setNodeDir } from './tabs';
 
@@ -31,6 +32,17 @@ let parking: HTMLElement;
 const MIN_RATIO_PCT = 15;
 const MAX_RATIO_PCT = 85;
 const FOCUS_TOGGLE_SELECTOR = '.workspace-child[data-pane]';
+
+/* POSIX single-quote escaping (same rules as Python's shlex.quote): keeps
+   spaces, quotes, `$`, backticks and globs in a path from being re-read by
+   the shell once we type the path into the PTY. */
+function quotePath(path: string): string {
+  return /[^\w@%+=:,./-]/.test(path) ? "'" + path.replace(/'/g, "'\\''") + "'" : path;
+}
+
+function writePaths(tabId: string, paths: string[]): void {
+  window.bentomux.writeTab(tabId, paths.map(quotePath).join(' '));
+}
 
 function cssVar(name: string): string {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
@@ -94,6 +106,7 @@ export function initTerminalEvents(): void {
     const live = lives.get(id);
     if (live) live.term.write('\r\n\x1b[2m[process exited]\x1b[0m\r\n');
   });
+  window.bentomux.onFileDrop(handleFileDrop);
 }
 function createXterm(tabId: string): { term: Terminal; fit: FitAddon; host: HTMLElement } {
   const fontFamily = monoFont();
@@ -128,7 +141,6 @@ function createXterm(tabId: string): { term: Terminal; fit: FitAddon; host: HTML
 
   wireXtermEvents(term, tabId);
   wireFocusIn(host, tabId);
-  wireFileDrop(host, tabId);
   const result = { term, fit, host };
   console.log('[DEBUG createXterm] Returning:', result);
   return result;
@@ -159,11 +171,13 @@ function wireXtermEvents(term: Terminal, tabId: string): void {
       term.scrollToBottom();
       return false;
     }
-    /* Shift+Enter → kirim newline literal (\n) bukan carriage return, supaya
-       AI CLI tools (Claude, aider, dll.) bisa insert baris baru tanpa submit */
-    if (e.shiftKey && e.key === 'Enter' && e.type === 'keydown') {
+    /* Shift+Enter → send a literal newline (\n) instead of the carriage
+       return Enter sends, so AI CLIs insert a new line instead of submitting.
+       xterm calls this handler for keydown *and* keypress, and its keypress
+       path derives '\r' from the Enter charCode: block both, but write once. */
+    if (e.shiftKey && e.key === 'Enter') {
       e.preventDefault();
-      window.bentomux.writeTab(tabId, '\n');
+      if (e.type === 'keydown') window.bentomux.writeTab(tabId, '\n');
       return false;
     }
     return true;
@@ -173,50 +187,37 @@ function wireXtermEvents(term: Terminal, tabId: string): void {
   wireClipboardPaste(term, tabId);
 }
 
-/* Handle Cmd+V paste of files and images from clipboard.
-   Uses the textarea `paste` event (clipboardData) — no permission prompt. */
+/* Cmd+V of an image or a file → stage the bytes in the temp dir and type the
+   resulting absolute path into the PTY. A WebView exposes no filesystem path
+   for clipboard files, so without this the terminal only ever received the
+   bare name ("image.png"). Plain text falls through to xterm's own paste. */
 function wireClipboardPaste(term: Terminal, tabId: string): void {
-  /* term.textarea is available after term.open() */
   const textarea = term.textarea;
   if (!textarea) return;
   textarea.addEventListener('paste', e => {
     const cd = e.clipboardData;
     if (!cd) return;
+    const file = cd.files[0] || Array.from(cd.items).find(it => it.kind === 'file')?.getAsFile();
+    if (!file) return;
+    e.preventDefault();
+    e.stopPropagation();
+    void stageClipboardFile(file).then(path => writePaths(tabId, [path]));
+  });
+}
 
-    /* 1. Files (e.g. dragged from Finder then Cmd+C → Cmd+V, or copied files) */
-    if (cd.files.length > 0) {
-      e.preventDefault();
-      e.stopPropagation();
-      const paths = Array.from(cd.files).map(f => {
-        const p = (f as File & { path?: string }).path || f.name;
-        return p.includes(' ') ? '"' + p + '"' : p;
-      });
-      window.bentomux.writeTab(tabId, paths.join(' '));
-      return;
-    }
-
-    /* 2. Image in clipboard (screenshot, copied image) → save to temp PNG */
-    const imageItem = Array.from(cd.items).find(it => it.type.startsWith('image/'));
-    if (imageItem) {
-      e.preventDefault();
-      e.stopPropagation();
-      const blob = imageItem.getAsFile();
-      if (!blob) return;
-      const reader = new FileReader();
-      reader.onload = () => {
-        const dataUrl = reader.result as string;
-        /* strip "data:image/png;base64," prefix */
-        const b64 = dataUrl.split(',')[1];
-        if (!b64) return;
-        void window.bentomux.saveClipboardImage(b64).then((path: string) => {
-          const quoted = path.includes(' ') ? '"' + path + '"' : path;
-          window.bentomux.writeTab(tabId, quoted);
-        });
-      };
-      reader.readAsDataURL(blob);
-      return;
-    }
-    /* plain text: let xterm handle it natively */
+/* resolves with the temp path, or with the clipboard's own file name when the
+   blob cannot be read — a bare name beats writing nothing at all */
+function stageClipboardFile(file: File): Promise<string> {
+  const name = file.name || 'paste.png';
+  return new Promise(resolve => {
+    const reader = new FileReader();
+    reader.onerror = () => resolve(name);
+    reader.onload = () => {
+      const dataUrl = String(reader.result);
+      const b64 = dataUrl.slice(dataUrl.indexOf(',') + 1);
+      resolve(window.bentomux.saveTempFile(name, b64).catch(() => name));
+    };
+    reader.readAsDataURL(file);
   });
 }
 
@@ -240,32 +241,31 @@ function wireFocusIn(host: HTMLElement, tabId: string): void {
   });
 }
 
-/* Drag-and-drop files/images onto terminal → write absolute path(s) to PTY.
-   Multiple files separated by spaces; paths with spaces are quoted. */
-function wireFileDrop(host: HTMLElement, tabId: string): void {
-  host.addEventListener('dragover', e => {
-    if (!e.dataTransfer?.types.includes('Files')) return;
-    e.preventDefault();
-    e.dataTransfer.dropEffect = 'copy';
-    host.classList.add('drop-active');
-  });
-  host.addEventListener('dragleave', e => {
-    /* only clear when leaving the host itself, not a child */
-    if (!host.contains(e.relatedTarget as Node)) host.classList.remove('drop-active');
-  });
-  host.addEventListener('drop', e => {
-    e.preventDefault();
-    host.classList.remove('drop-active');
-    const files = e.dataTransfer?.files;
-    if (!files || files.length === 0) return;
-    const paths = Array.from(files).map(f => {
-      /* In Tauri/WebKit the File object exposes the real FS path via .path
-         (non-standard but available in Tauri's WebView). Fall back to name. */
-      const p = (f as File & { path?: string }).path || f.name;
-      return p.includes(' ') ? '"' + p + '"' : p;
-    });
-    window.bentomux.writeTab(tabId, paths.join(' '));
-  });
+/* Tauri hands the whole window's OS drops to one webview event, so pick the
+   pane under the cursor ourselves. `x`/`y` arrive as CSS pixels. A drop aimed
+   at a divider, a gutter, or a point a few pixels off (the position mapping
+   is not testable here) still targets the pane the pointer last resolved to. */
+let lastDropHost: HTMLElement | null = null;
+
+function clearDropHighlight(): void {
+  for (const el of document.querySelectorAll('.terminal-host.drop-active')) el.classList.remove('drop-active');
+}
+
+function handleFileDrop(e: FileDropEvent): void {
+  clearDropHighlight();
+  if (e.type === 'leave') {
+    lastDropHost = null;
+    return;
+  }
+  const hit = document.elementFromPoint(e.x, e.y)?.closest('.terminal-host') as HTMLElement | null;
+  if (hit) lastDropHost = hit;
+  const host = hit ?? lastDropHost;
+  if (e.type !== 'drop') {
+    host?.classList.add('drop-active');
+    return;
+  }
+  const tabId = host?.dataset.tabId;
+  if (tabId && e.paths.length) writePaths(tabId, e.paths);
 }
 
 function ensureLive(tabId: string): Live {

@@ -343,9 +343,24 @@ export interface RemotePairing {
 
 /* ---------------- the preload bridge ---------------- */
 
+/** A native OS drag & drop over the webview. `x`/`y` are CSS pixels relative
+ *  to the window origin (the bridge normalises Tauri's per-platform raw
+ *  coordinates). `paths` carries absolute filesystem paths for `enter`/`drop`,
+ *  empty otherwise. */
+export interface FileDropEvent {
+  type: 'enter' | 'over' | 'drop' | 'leave';
+  x: number;
+  y: number;
+  paths: string[];
+}
+
 export interface BentomuxApi {
-  /* clipboard helpers */
-  saveClipboardImage(data: string): Promise<string>;
+  /* clipboard helpers: stage pasted clipboard bytes as a temp file and
+     return its absolute path */
+  saveTempFile(name: string, data: string): Promise<string>;
+
+  /* native file drag & drop over the window */
+  onFileDrop(cb: (e: FileDropEvent) => void): () => void;
 
   /* window chrome */
   minimize(): void;

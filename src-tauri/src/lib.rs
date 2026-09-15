@@ -120,7 +120,7 @@ pub fn run() {
             commands::win_toggle_fullscreen,
             commands::win_close,
             commands::shutdown_for_update,
-            commands::clipboard_save_image,
+            commands::temp_write_file,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
