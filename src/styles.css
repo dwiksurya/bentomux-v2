@@ -993,6 +993,12 @@ body:not(.pane-hidden) .titlebar.has-tabs .top-tools{display:flex!important}
   flex:1;min-height:0;min-width:0;
   display:flex;flex-direction:column;overflow:hidden;
 }
+/* the mounted panel root has to fill the slot, otherwise it grows to content
+   height and the aside's overflow:hidden clips it instead of scrolling */
+.git-panel-root{
+  flex:1;min-height:0;min-width:0;
+  display:flex;flex-direction:column;overflow:hidden;
+}
 .git-section{padding:10px 14px;border-bottom:1px solid var(--line)}
 .git-section:last-child{border-bottom:0}
 .git-section-h{
