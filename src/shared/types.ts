@@ -344,6 +344,9 @@ export interface RemotePairing {
 /* ---------------- the preload bridge ---------------- */
 
 export interface BentomuxApi {
+  /* clipboard helpers */
+  saveClipboardImage(data: string): Promise<string>;
+
   /* window chrome */
   minimize(): void;
   toggleMaximize(): void;

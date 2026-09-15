@@ -110,7 +110,9 @@ function createXterm(tabId: string): { term: Terminal; fit: FitAddon; host: HTML
     letterSpacing: 0,
     cursorBlink: false,
     allowProposedApi: true,
-    scrollback: 4000,
+    scrollback: 1000,
+    mouseWheelScrollSensitivity: 5,
+    fastScrollSensitivity: 10,
   });
   console.log('[DEBUG createXterm] Terminal instance created:', term);
   const fit = new FitAddon();
@@ -144,6 +146,18 @@ function wireXtermEvents(term: Terminal, tabId: string): void {
         void navigator.clipboard.writeText(sel);
         term.clearSelection();
       }
+      return false;
+    }
+    /* Cmd/Ctrl+Home → scroll to top instantly */
+    if ((e.metaKey || e.ctrlKey) && e.key === 'Home' && e.type === 'keydown') {
+      e.preventDefault();
+      term.scrollToTop();
+      return false;
+    }
+    /* Cmd/Ctrl+End → scroll to bottom instantly */
+    if ((e.metaKey || e.ctrlKey) && e.key === 'End' && e.type === 'keydown') {
+      e.preventDefault();
+      term.scrollToBottom();
       return false;
     }
     /* Shift+Enter → kirim newline literal (\n) bukan carriage return, supaya
@@ -195,7 +209,7 @@ function wireClipboardPaste(term: Terminal, tabId: string): void {
         /* strip "data:image/png;base64," prefix */
         const b64 = dataUrl.split(',')[1];
         if (!b64) return;
-        void window.bentomux.saveClipboardImage(b64).then(path => {
+        void window.bentomux.saveClipboardImage(b64).then((path: string) => {
           const quoted = path.includes(' ') ? '"' + path + '"' : path;
           window.bentomux.writeTab(tabId, quoted);
         });
