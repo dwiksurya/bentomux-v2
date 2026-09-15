@@ -33,11 +33,15 @@ pub fn run() {
         use tauri::Emitter;
         use tauri::Manager;
         let handle = app.handle().clone();
+        // Manage state and pty immediately — before any other work — so the
+        // backend state is available the instant WebView2 (Windows) fires its
+        // first IPC call. On Windows, WebView2 can initialize fast enough to
+        // invoke `get_state` before a later `app.manage()` runs.
         let state = state::AppStateManager::with_app_handle(&handle);
-        let pty = pty::PtyManager::new(Some(handle.clone()));
-        git::init_watch(handle.clone());
         app.manage(state);
+        let pty = pty::PtyManager::new(Some(handle.clone()));
         app.manage(pty);
+        git::init_watch(handle.clone());
         /* boot-time remote restore: mirrors Electron's index.ts startRemote()
            call when prefs.remote.enabled was persisted true from a prior
            session — otherwise the panel shows "On" but never actually starts. */
