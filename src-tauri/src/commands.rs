@@ -266,6 +266,12 @@ pub fn tab_restore(state: State<'_, AppStateManager>, pty: State<'_, PtyManager>
         let s = state.get_state();
         (s.workspaces, s.open_tabs)
     };
+    /* start git HEAD watchers for every persisted workspace; without this
+       a restored session never receives branch-change events because
+       watch_workspace is only called on workspace_add / tab_create / tab_split */
+    for ws in &workspaces {
+        crate::git::watch_workspace(&ws.id, &ws.path);
+    }
     let created = pty.restore_terms(&workspaces, &open_tabs);
     state.patch_state(|s| s.open_tabs = created.clone());
     created

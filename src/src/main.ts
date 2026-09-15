@@ -227,6 +227,10 @@ registerRenderers({ root: renderRoot, content: renderContentInner, sidebar: rend
 
 /* ---------------- clock: refresh relative times ---------------- */
 
+/* poll Changes pill every 5 s so +N -N stays accurate as files change,
+   even when the git panel is closed */
+setInterval(() => { void refreshChangesPill(); }, 5000);
+
 setInterval(() => {
   $$('[data-ts]').forEach(el => {
     const ts = Number((el as HTMLElement).dataset.ts);
