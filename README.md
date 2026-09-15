@@ -52,10 +52,17 @@ Bentomux v2 is the Tauri 2 port of the original Electron application. The render
 
 Prebuilt releases are published for macOS, Linux (x86_64) and Windows.
 
+The commands below use `bentomux.netlify.app/install.sh`, `/install.ps1` and
+`/install.cmd`, which redirect to `installers/install.sh`,
+`installers/install.ps1` and `installers/install.cmd` in this repository. The
+short link is the same script, served from the same place; the marketing site
+quotes these strings, so keep the host in step with `NEXT_PUBLIC_SITE_URL`
+there.
+
 **macOS and Linux**
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/takora-dev/bentomux-v2/master/installers/install.sh | sh
+curl -fsSL https://bentomux.netlify.app/install.sh | sh
 ```
 
 Installs the `.app` bundle into `/Applications` on macOS, and the AppImage into `~/.local/bin` (plus a desktop entry) on Linux. Add `--deb` to install the Debian package through `apt` instead, or `--dry-run` to resolve and verify the release without installing anything.
@@ -63,13 +70,13 @@ Installs the `.app` bundle into `/Applications` on macOS, and the AppImage into 
 **Windows**
 
 ```powershell
-powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/takora-dev/bentomux-v2/master/installers/install.ps1 | iex"
+powershell -ExecutionPolicy Bypass -c "irm https://bentomux.netlify.app/install.ps1 | iex"
 ```
 
 Where policy or endpoint security blocks PowerShell running straight from the internet:
 
 ```bat
-curl.exe -fsSLo install.cmd https://raw.githubusercontent.com/takora-dev/bentomux-v2/master/installers/install.cmd && install.cmd && del install.cmd
+curl.exe -fsSLo install.cmd https://bentomux.netlify.app/install.cmd && install.cmd && del install.cmd
 ```
 
 Windows installs the per-user NSIS setup (no UAC prompt), falling back to the MSI.
