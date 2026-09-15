@@ -6,6 +6,8 @@
    (idle / working / blocked). */
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -193,22 +195,38 @@ fn matches_matcher(m: &Matcher, text: &str, lines: &[String]) -> bool {
     true
 }
 
+/* Compiled-regex cache. Manifests are re-evaluated on every runtime tick
+   (once a second, per tab), so compiling inside the matcher rebuilt the
+   same patterns continuously. Keyed on the pattern source; an invalid
+   pattern is cached as None so the `contains` fallback is taken too. */
+fn compiled(r: &str) -> Option<regex::Regex> {
+    static CACHE: OnceLock<Mutex<HashMap<String, Option<regex::Regex>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = cache.lock().unwrap();
+    if let Some(hit) = guard.get(r) {
+        return hit.clone();
+    }
+    let built = regex::Regex::new(r).ok();
+    guard.insert(r.to_string(), built.clone());
+    built
+}
+
 /* TS: new RegExp(r, 'm').test(text) — an unanchored search that also lets
    ^ / $ match at any line boundary. We approximate: try `^`/`$` multi-line
    semantics by matching against each line (oldest-first join already gives
    us each physical line), falling back to a substring regex search. */
 fn regex_multi_hit(r: &str, text: &str) -> bool {
-    if let Ok(re) = regex::Regex::new(r) {
-        return re.is_match(text);
+    match compiled(r) {
+        Some(re) => re.is_match(text),
+        None => text.contains(r),
     }
-    text.contains(r)
 }
 
 fn regex_line_hit(r: &str, line: &str) -> bool {
-    if let Ok(re) = regex::Regex::new(r) {
-        return re.is_match(line);
+    match compiled(r) {
+        Some(re) => re.is_match(line),
+        None => line.contains(r),
     }
-    line.contains(r)
 }
 
 fn matches_rule(rule: &Rule, screen: &ScreenInput) -> bool {
@@ -307,5 +325,20 @@ mod tests {
             lines: vec!["DO YOU WANT TO PROCEED?".to_string()],
         });
         assert_eq!(d.state, Some(RunState::Blocked));
+    }
+
+    /* the compiled-regex cache is on the 1 Hz tick path; a pattern that fails
+       to compile must still be cached (as None) and fall back to a substring
+       search on every subsequent call, not just the first */
+    #[test]
+    fn invalid_regex_caches_and_falls_back_to_contains() {
+        let bad = r"^(unclosed[[:alpha:";
+        assert!(regex::Regex::new(bad).is_err());
+        assert!(!regex_line_hit(bad, "nothing here"));
+        assert!(regex_line_hit(bad, &format!("prefix {bad} suffix")));
+        assert!(regex_multi_hit(bad, &format!("multi\n{bad}\nline")));
+        /* a valid pattern still works through the same cache */
+        assert!(regex_line_hit(r"^\s*❯", "  ❯ 1. yes"));
+        assert!(!regex_line_hit(r"^\s*❯", "text ❯ not at start"));
     }
 }
