@@ -111,7 +111,6 @@ function createXterm(tabId: string): { term: Terminal; fit: FitAddon; host: HTML
     cursorBlink: false,
     allowProposedApi: true,
     scrollback: 1000,
-    mouseWheelScrollSensitivity: 5,
     fastScrollSensitivity: 10,
   });
   console.log('[DEBUG createXterm] Terminal instance created:', term);
