@@ -140,6 +140,7 @@ pub struct AgentHooksStatus {
    published on `rt:status` when anything changes, and mirrored into
    `latest` for surfaces outside the renderer (remote monitor). */
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 
@@ -281,38 +282,65 @@ const NAME_RE: &[(&str, &str)] = &[
 
 const MINOR_RE: &str = r"^(qwenpaw|qwen|kimi|kilo|droid)(-code)?(\.exe|\.cmd|\.bat)?$";
 
+/* Patterns are compiled once: match_agent runs per descendant process on
+   every runtime tick, so building the 18 binary-name regexes inline meant
+   ~hundreds of regex compilations per second. */
+fn name_res() -> &'static [(&'static str, regex::Regex)] {
+    static RES: OnceLock<Vec<(&'static str, regex::Regex)>> = OnceLock::new();
+    RES.get_or_init(|| {
+        NAME_RE
+            .iter()
+            .filter_map(|(agent, re)| regex::Regex::new(re).ok().map(|c| (*agent, c)))
+            .collect()
+    })
+}
+
+fn claude_cmd_re() -> &'static regex::Regex {
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        regex::Regex::new(r#"(^|[\\/"])claude(\.exe)?(["']?\s|$)"#).expect("valid claude wrapper regex")
+    })
+}
+
+fn minor_re() -> &'static regex::Regex {
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    RE.get_or_init(|| regex::Regex::new(MINOR_RE).expect("valid minor-agent regex"))
+}
+
 fn match_agent(name: &str, cmd: Option<&str>) -> Option<&'static str> {
-    let n = name.to_lowercase();
-    let c = cmd.map(|s| s.to_lowercase()).unwrap_or_default();
-    for (agent, re) in NAME_RE {
-        if let Ok(re) = regex::Regex::new(re) {
-            if re.is_match(&n) {
-                return Some(agent);
-            }
+    /* process names are lowercase in practice — only allocate when they aren't */
+    let n: Cow<'_, str> = if name.bytes().any(|b| b.is_ascii_uppercase()) {
+        Cow::Owned(name.to_lowercase())
+    } else {
+        Cow::Borrowed(name)
+    };
+    for (agent, re) in name_res() {
+        if re.is_match(&n) {
+            return Some(agent);
         }
     }
+    /* the command-line pass is only reached when the binary name gave no
+       answer, so the lowercased cmd string is built lazily here */
+    let c = cmd.map(|s| s.to_lowercase()).unwrap_or_default();
     /* npm-wrapper invocations only visible in the command line */
     if c.contains("@anthropic-ai/claude-code") || c.contains("@anthropic-ai\\claude-code") {
         return Some("claude");
     }
     /* (^|[\\/"])claude(\.exe)?(["']?\s|$) on the first 240 chars */
-    if let Ok(re) = regex::Regex::new(r#"(^|[\\/"])claude(\.exe)?(["']?\s|$)"#) {
+    {
         let head: String = c.chars().take(240).collect();
-        if re.is_match(&head) {
+        if claude_cmd_re().is_match(&head) {
             return Some("claude");
         }
-    }
-    if c.contains("@earendil-works/pi-coding-agent") || c.contains(".pi/agent") || c.contains(".pi\\agent") {
-        return Some("pi");
-    }
-    if c.contains("@openai/codex") || c.contains("@openai\\codex") {
-        return Some("codex");
     }
     if c.contains("@earendil-works/pi-coding-agent")
         || c.contains("@mariozechner/pi-coding-agent")
         || c.contains(".pi/agent") || c.contains(".pi\\agent")
     {
         return Some("pi");
+    }
+    if c.contains("@openai/codex") || c.contains("@openai\\codex") {
+        return Some("codex");
     }
     if c.contains("oh-my-pi") || c.contains("oh_my_pi") || c.contains("/omp") || c.contains("\\\\omp") {
         return Some("omp");
@@ -321,23 +349,28 @@ fn match_agent(name: &str, cmd: Option<&str>) -> Option<&'static str> {
         return Some("gemini");
     }
     /* minor agents via the unified name regex */
-    if let Ok(re) = regex::Regex::new(MINOR_RE) {
-        if let Some(m) = re.captures(&n) {
-            return Some(match m.get(1).unwrap().as_str() {
-                "qwenpaw" => "qwenpaw",
-                "qwen" => "qwen",
-                "kimi" => "kimi",
-                "kilo" => "kilo",
-                "droid" => "droid",
-                "amp" => "amp",
-                _ => unreachable!(),
-            });
-        }
+    if let Some(m) = minor_re().captures(&n) {
+        return Some(match m.get(1).unwrap().as_str() {
+            "qwenpaw" => "qwenpaw",
+            "qwen" => "qwen",
+            "kimi" => "kimi",
+            "kilo" => "kilo",
+            "droid" => "droid",
+            "amp" => "amp",
+            _ => unreachable!(),
+        });
     }
     None
 }
 
 fn snapshot() -> Vec<Proc> {
+    /* NOTE (measured): narrowing this to ProcessRefreshKind::new().with_cmd(
+       OnlyIfNotSet) over a System reused across ticks — i.e. skipping the
+       per-process memory/disk/cwd/environ syscalls — came out at 55.0ms vs
+       56.7ms per tick over 867 processes (release, macOS). The cost is
+       dominated by the unconditional KERN_PROCARGS2 argv+env read that
+       sysinfo performs per process to populate `name`, which no refresh kind
+       avoids, so the extra machinery was not worth keeping. */
     let mut sys = System::new();
     sys.refresh_processes_specifics(
         ProcessesToUpdate::All,
