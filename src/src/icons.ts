@@ -6,6 +6,7 @@ export const DIA = '<svg width="9" height="9" viewBox="0 0 10 10"><rect x="2.2" 
 
 export const IC = {
   lines:  '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M2.5 4h11M2.5 8h11M2.5 12h7"/></svg>',
+  plus:   '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M8 3v10M3 8h10"/></svg>',
   git2:   '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12.5h10M3 6.5h7M3 3.5h10M3 9.5h10"/><circle cx="11.5" cy="6.5" r="1.2" fill="currentColor"/></svg>',
   chat:   '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M2.5 3.5h11v7h-6l-3.5 3v-3h-1.5z"/></svg>',
   chev:   '<svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4 2.5 7.5 6 4 9.5"/></svg>',

@@ -559,8 +559,8 @@ html.drag-on, html.drag-on *{cursor:grabbing !important;user-select:none !import
   background:var(--surface);
 }
 .search-trigger:hover .shortcut{border-color:var(--line-2)}
-/* gear in the bottom dock of the sidebar; always visible (unlike ws-add
-   which is hover-revealed) because it's the primary settings entry point */
+/* gear in the bottom dock of the sidebar; always visible because it's the
+   primary settings entry point */
 .sidebar-gear{width:28px;height:28px;border-radius:6px}
 .sidebar-gear .ic{width:15px;height:15px;opacity:.8}
 .sidebar-gear:hover .ic{opacity:1}
@@ -712,15 +712,14 @@ html.drag-on, html.drag-on *{cursor:grabbing !important;user-select:none !import
    ============================================================ */
 
 
-.ws-label{display:flex;align-items:center;gap:4px;margin:16px 12px 5px;padding-right:2px}
+.ws-label{display:flex;align-items:center;gap:4px;margin:16px 7px 5px;padding-right:2px}
 .ws-label>span:first-child{flex:1}
 .ws-label .nav-label{margin:0;flex:1}
-.ws-label .ws-add{width:20px;height:20px;display:inline-flex;align-items:center;justify-content:center;border-radius:5px;color:var(--ink-3);font-size:15px;line-height:1;opacity:0;pointer-events:none;transition:opacity .12s,background .1s,color .1s}
-.ws-label:hover .ws-add,.ws-add:focus-visible{opacity:1;pointer-events:auto}
-.ws-label .ws-add:hover{background:var(--tint);color:var(--ink)}
-.ws-menu{width:20px;height:22px;display:inline-flex;align-items:center;justify-content:center;border-radius:5px;color:var(--ink-3);opacity:0;transition:opacity .12s,background .1s,color .1s;cursor:pointer;flex:0 0 auto}
+.ws-label .ws-add{width:24px;height:24px;display:inline-flex;align-items:center;justify-content:center;border-radius:6px;border:1px solid var(--line);color:var(--ink-2);transition:background .1s,border-color .1s,color .1s}
+.ws-label .ws-add .ic{display:flex}
+.ws-label .ws-add:hover{background:var(--tint);border-color:var(--line-2);color:var(--ink)}
+.ws-menu{width:24px;height:24px;display:inline-flex;align-items:center;justify-content:center;border-radius:6px;color:var(--ink-2);transition:background .1s,color .1s;cursor:pointer;flex:0 0 auto}
 .ws-menu-icon{display:flex}
-.folder:hover .ws-menu,.folder:focus-within .ws-menu{opacity:1}
 .ws-menu:hover{color:var(--ink);background:var(--tint)}
 .tabadd[disabled]{opacity:.35;cursor:default}
 .tabadd[disabled]:hover{background:none;color:var(--ink-2)}

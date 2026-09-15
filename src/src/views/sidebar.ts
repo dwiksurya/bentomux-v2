@@ -213,7 +213,7 @@ export function toggleGitPanel(): void {
 function workspaceLabelRow(): HTMLElement {
   return h('div', { class: 'ws-label' },
     h('span', { class: 'nav-label' }, 'Workspace'),
-    h('button', { class: 'ws-add', title: 'Add workspace folder', 'aria-label': 'Add workspace folder', onclick: () => addWorkspaceFlow() }, '+'));
+    h('button', { class: 'ws-add', title: 'Add workspace folder', 'aria-label': 'Add workspace folder', onclick: () => addWorkspaceFlow() }, ic('plus')));
 }
 
 function toggleWorkspaceExpanded(wsId: string, currentlyOpen: boolean): void {
