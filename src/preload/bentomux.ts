@@ -57,6 +57,9 @@ function subscribe<T>(event: string, cb: (payload: T) => void): () => void {
 }
 
 const api = {
+  /* clipboard helpers */
+  saveClipboardImage: (data: string) => invoke<string>('clipboard_save_image', { data }),
+
   /* window chrome */
   minimize: () => { void invoke('win_minimize'); },
   toggleMaximize: () => { void invoke('win_toggle_maximize'); },

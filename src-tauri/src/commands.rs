@@ -719,3 +719,23 @@ pub fn win_toggle_fullscreen(window: tauri::Window) {
 pub fn win_close(window: tauri::Window) {
     let _ = window.close();
 }
+
+/* Save base64-encoded image bytes to a temp file and return its path.
+   The renderer calls this when the user pastes an image from clipboard. */
+#[tauri::command]
+pub fn clipboard_save_image(data: String) -> Result<String, String> {
+    use std::io::Write;
+    let bytes = base64_decode(&data).map_err(|e| e.to_string())?;
+    let tmp = std::env::temp_dir();
+    let name = format!("bentomux-paste-{}.png", rand::random::<u32>());
+    let path = tmp.join(&name);
+    std::fs::File::create(&path)
+        .and_then(|mut f| f.write_all(&bytes))
+        .map_err(|e| e.to_string())?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+fn base64_decode(s: &str) -> Result<Vec<u8>, base64::DecodeError> {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.decode(s)
+}
