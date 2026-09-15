@@ -13,7 +13,7 @@
    closes via agent:approvalClosed. */
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -588,6 +588,14 @@ fn cloudflared_resource_path(resource_dir: &Path, target: &str, windows: bool) -
     resource_dir.join("cloudflared").join(target).join(if windows { "cloudflared.exe" } else { "cloudflared" })
 }
 
+/* the gzipped form of the same path: what the bundler actually ships (39.8 MB
+   raw -> 20.3 MB gzipped on darwin-x86_64, 37.1 -> 18.5 on darwin-aarch64) */
+fn cloudflared_gz_resource_path(resource_dir: &Path, target: &str, windows: bool) -> std::path::PathBuf {
+    let mut p = cloudflared_resource_path(resource_dir, target, windows).into_os_string();
+    p.push(".gz");
+    PathBuf::from(p)
+}
+
 /* the bundler declares this resource as `../resources/cloudflared/...` and stores
    `..` components as `_up_`, so the packaged lookup has to go through
    `PathResolver::resolve` (which applies the same rewrite). Joining
@@ -598,26 +606,100 @@ fn cloudflared_resource_rel(target: &str, windows: bool) -> String {
     format!("../resources/cloudflared/{target}/{}", if windows { "cloudflared.exe" } else { "cloudflared" })
 }
 
+fn cloudflared_resource_rel_gz(target: &str, windows: bool) -> String {
+    format!("{}.gz", cloudflared_resource_rel(target, windows))
+}
+
+/* identifies the exact source file a cached binary was inflated from, so an
+   app update that ships a new cloudflared re-inflates instead of reusing the
+   stale binary. Length + mtime is enough: this is a build artifact inside the
+   signed bundle, not untrusted input. */
+fn source_stamp(gz: &Path) -> Option<String> {
+    let meta = std::fs::metadata(gz).ok()?;
+    let nanos = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    Some(format!("{}:{nanos}", meta.len()))
+}
+
+/* inflate `gz` to `bin`, chmod +x, and record the source stamp. Writes to a
+   process-unique temp file and renames, so a concurrent inflate or a crash
+   never leaves a truncated executable behind. */
+fn inflate_to(gz: &Path, bin: &Path, stamp: &Path) -> std::io::Result<()> {
+    let name = bin.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "cloudflared".to_string());
+    let tmp = bin.with_file_name(format!("{name}.{}.tmp", std::process::id()));
+    let result = (|| -> std::io::Result<()> {
+        let mut input = flate2::read::GzDecoder::new(std::fs::File::open(gz)?);
+        let mut out = std::fs::File::create(&tmp)?;
+        std::io::copy(&mut input, &mut out)?;
+        out.sync_all()?;
+        drop(out);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))?;
+        }
+        std::fs::rename(&tmp, bin)?;
+        std::fs::write(stamp, source_stamp(gz).unwrap_or_default())?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
+}
+
+/* return an executable path for the bundled cloudflared, inflating the shipped
+   .gz into the app cache once (and again whenever the bundled copy changes).
+   ponytail: dev and installed builds share this cache dir, so alternating
+   between them re-inflates each time; give it its own subdir if that ever
+   matters. Windows also fails the rename if the installed app is running. */
+fn unpack_cloudflared(app: &tauri::AppHandle, target: &str, is_win: bool, gz: &Path) -> Option<String> {
+    let name = if is_win { "cloudflared.exe" } else { "cloudflared" };
+    let dir = app.path().app_cache_dir().ok()?.join("cloudflared").join(target);
+    let bin = dir.join(name);
+    let stamp = dir.join("source.meta");
+    let source = source_stamp(gz)?;
+    if bin.is_file() && std::fs::read_to_string(&stamp).is_ok_and(|s| s == source) {
+        return Some(bin.to_string_lossy().into_owned());
+    }
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        eprintln!("[bentomux] cloudflared cache dir {}: {e}", dir.display());
+        return None;
+    }
+    if let Err(e) = inflate_to(gz, &bin, &stamp) {
+        eprintln!("[bentomux] failed to inflate bundled {}: {e}", gz.display());
+        return None;
+    }
+    Some(bin.to_string_lossy().into_owned())
+}
+
 fn bundled_cloudflared(app: &tauri::AppHandle) -> Option<String> {
     let target = cloudflared_target()?;
     let is_win = cfg!(target_os = "windows");
-    if let Ok(p) = app.path().resolve(cloudflared_resource_rel(target, is_win), BaseDirectory::Resource) {
-        if p.is_file() {
-            return Some(p.to_string_lossy().into_owned());
-        }
+    /* resolve() applies the bundler's `..` -> `_up_` rewrite, so the packaged
+       dir has to come from a resolved path rather than resource_dir() */
+    let mut packed: Vec<PathBuf> = Vec::new();
+    if let Ok(p) = app.path().resolve(cloudflared_resource_rel_gz(target, is_win), BaseDirectory::Resource) {
+        packed.push(p);
     }
-    // dev fallback: during `tauri dev` resourceDir is the temp bundle dir,
-    // so also try the repo layout relative to the executable / cwd
+    /* dev fallback: during `tauri dev` resourceDir is the temp bundle dir, so
+       also try the repo layout relative to the executable / cwd. The repo
+       holds the same .gz the bundle does (prepare:cloudflared removes the raw
+       binary), so dev exercises the inflate path in production too. */
     for base in [
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../resources"),
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../resources"),
         std::env::current_dir().unwrap_or_default().join("resources"),
     ] {
-        let p = cloudflared_resource_path(&base, target, is_win);
-        if p.is_file() {
-            return Some(p.to_string_lossy().into_owned());
-        }
+        packed.push(cloudflared_gz_resource_path(&base, target, is_win));
     }
-    None
+    packed
+        .into_iter()
+        .filter(|p| p.is_file())
+        .find_map(|gz| unpack_cloudflared(app, target, is_win, &gz))
 }
 
 pub fn start_tunnel(app: &tauri::AppHandle, port: u16) {
@@ -848,6 +930,93 @@ mod tests {
     fn bundled_resource_rel_requires_up_prefix_rewrite() {
         assert_eq!(cloudflared_resource_rel("darwin-x86_64", false), "../resources/cloudflared/darwin-x86_64/cloudflared");
         assert_eq!(cloudflared_resource_rel("windows-x86_64", true), "../resources/cloudflared/windows-x86_64/cloudflared.exe");
+    }
+
+    /* the bundler ships only the .gz (tauri.conf.json bundles the
+       resources/cloudflared directory, which prepare:cloudflared leaves holding
+       nothing but the archive), so the packaged lookup has to name the
+       compressed file */
+    #[test]
+    fn bundled_gz_paths_mirror_the_binary_paths() {
+        let root = Path::new("/resources");
+        assert_eq!(cloudflared_gz_resource_path(root, "darwin-x86_64", false), Path::new("/resources/cloudflared/darwin-x86_64/cloudflared.gz"));
+        assert_eq!(cloudflared_gz_resource_path(root, "windows-x86_64", true), Path::new("/resources/cloudflared/windows-x86_64/cloudflared.exe.gz"));
+        assert_eq!(cloudflared_resource_rel_gz("linux-aarch64", false), "../resources/cloudflared/linux-aarch64/cloudflared.gz");
+    }
+
+    /* the inflate step is what makes the gzipped bundle usable: bytes must
+       round-trip, the binary must come out executable, the *.tmp staging file
+       must not survive, and the stamp must record this exact source */
+    #[test]
+    fn inflates_gz_and_stamps_the_source() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("bentomux-inflate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let gz = dir.join("cloudflared.gz");
+        let payload = b"#!/bin/sh\necho cloudflared\n";
+        let mut enc = flate2::write::GzEncoder::new(std::fs::File::create(&gz).unwrap(), flate2::Compression::default());
+        enc.write_all(payload).unwrap();
+        enc.finish().unwrap();
+
+        let bin = dir.join("cloudflared");
+        let stamp = dir.join("source.meta");
+        inflate_to(&gz, &bin, &stamp).unwrap();
+
+        assert_eq!(std::fs::read(&bin).unwrap(), payload);
+        assert_eq!(std::fs::read_to_string(&stamp).unwrap(), source_stamp(&gz).unwrap());
+        assert!(!dir.join(format!("cloudflared.{}.tmp", std::process::id())).exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&bin).unwrap().permissions().mode() & 0o777, 0o755);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /* a corrupt bundle must fail the inflate instead of leaving a truncated
+       executable for spawn to trip over */
+    #[test]
+    fn failed_inflate_leaves_no_staged_or_target_file() {
+        let dir = std::env::temp_dir().join(format!("bentomux-inflate-bad-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let gz = dir.join("cloudflared.gz");
+        std::fs::write(&gz, b"not a gzip stream").unwrap();
+
+        let bin = dir.join("cloudflared");
+        assert!(inflate_to(&gz, &bin, &dir.join("source.meta")).is_err());
+        assert!(!bin.exists());
+        assert!(!dir.join(format!("cloudflared.{}.tmp", std::process::id())).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /* the archive the bundler actually ships has to inflate into something
+       `start_tunnel` can spawn: this is the only check that runs the real 37-40 MB
+       artifact instead of a synthetic payload, and gets skipped (not silently
+       passed) when prepare:cloudflared has not run in this checkout */
+    #[test]
+    fn real_bundled_archive_inflates_to_a_runnable_cloudflared() {
+        let Some(target) = cloudflared_target() else { return };
+        let is_win = cfg!(target_os = "windows");
+        let gz = cloudflared_gz_resource_path(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../resources"), target, is_win);
+        if !gz.is_file() {
+            eprintln!("skipping: {} not prepared (run `npm run prepare:cloudflared`)", gz.display());
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("bentomux-real-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join(if is_win { "cloudflared.exe" } else { "cloudflared" });
+        inflate_to(&gz, &bin, &dir.join("source.meta")).unwrap();
+
+        // a truncated decode would still return Ok, so size and execution both count
+        assert!(std::fs::metadata(&bin).unwrap().len() > 30 * 1024 * 1024, "inflated cloudflared is too small");
+        let out = std::process::Command::new(&bin).arg("--version").output().unwrap();
+        let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        assert!(out.status.success(), "cloudflared --version failed: {text}");
+        assert!(text.contains("cloudflared version"), "unexpected cloudflared output: {text}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

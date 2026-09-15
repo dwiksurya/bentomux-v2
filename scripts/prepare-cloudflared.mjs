@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
-import { chmodSync, copyFileSync, createWriteStream, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync } from 'node:fs';
+import { chmodSync, copyFileSync, createWriteStream, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { gzipSync } from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
 
@@ -45,7 +46,7 @@ const RELEASES = {
 const isUniversalMacOS = process.env.CLOUDFLARED_ALL_MACOS_ARCHS === '1';
 
 if (isUniversalMacOS && process.argv.includes('--check')) {
-  for (const target of ['darwin-x86_64', 'darwin-aarch64']) console.log(`${target}: ${join(RESOURCE_ROOT, target, 'cloudflared')}`);
+  for (const target of ['darwin-x86_64', 'darwin-aarch64']) console.log(`${target}: ${join(RESOURCE_ROOT, target, 'cloudflared.gz')}`);
   process.exit(0);
 }
 
@@ -98,15 +99,27 @@ async function download(url, destination) {
 const target = process.env.CLOUDFLARED_TARGET || hostTarget();
 const release = RELEASES[target];
 if (!release) throw new Error(`Unsupported cloudflared target: ${target}`);
+/* The bundler ships `<target>/cloudflared.gz` and remote.rs inflates it into
+   the app cache on first tunnel use: 39.8 MB raw -> 20.3 MB gzipped per arch,
+   and the raw binary is not what a bundle wants anyway (no nested Mach-O in
+   the .app for the macOS notarizer to sign). The raw is staged here only long
+   enough to be gzipped, then removed so the directory the bundler walks holds
+   nothing else. `--check` still prints the path CI greps for. */
 const destination = targetPath(target);
+const gzDestination = `${destination}.gz`;
+/* records the upstream archive hash this .gz was built from, so bumping
+   VERSION re-prepares instead of silently reusing a stale binary. Lives
+   outside the per-target dirs so it never reaches a bundle. */
+const stampPath = join(RESOURCE_ROOT, '.prepared.json');
+const prepared = existsSync(stampPath) ? JSON.parse(readFileSync(stampPath, 'utf8')) : {};
 const checkOnly = process.argv.includes('--check');
 
 if (checkOnly) {
-  console.log(`${target}: ${destination}`);
+  console.log(`${target}: ${gzDestination}`);
   process.exit(0);
 }
 
-if (existsSync(destination) && sha256(destination) === release.sha256) {
+if (existsSync(gzDestination) && prepared[target] === release.sha256) {
   console.log(`cloudflared ${VERSION} already prepared for ${target}`);
   process.exit(0);
 }
@@ -134,7 +147,16 @@ try {
   if (!existsSync(temporary)) throw new Error(`Failed to stage cloudflared for ${target}`);
   if (process.platform !== 'win32') chmodSync(temporary, 0o755);
   renameSync(temporary, destination);
-  console.log(`Prepared ${destination}`);
+
+  /* No filename or timestamp in the gzip header: two runs over the same
+     verified download must produce byte-identical output. */
+  const raw = readFileSync(destination);
+  const packed = gzipSync(raw, { level: 9 });
+  writeFileSync(gzDestination, packed);
+  rmSync(destination, { force: true });
+  prepared[target] = release.sha256;
+  writeFileSync(stampPath, `${JSON.stringify(prepared, null, 2)}\n`);
+  console.log(`Prepared ${gzDestination} (${(raw.length / 1048576).toFixed(1)} MB raw, ${(packed.length / 1048576).toFixed(1)} MB gzipped)`);
 } finally {
   rmSync(work, { recursive: true, force: true });
 }

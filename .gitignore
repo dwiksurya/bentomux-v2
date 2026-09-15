@@ -14,5 +14,7 @@ out-test/
 *.log
 
 # Generated production bundle dependency; prepare:cloudflared downloads it.
+# Only the .gz is kept — the raw binary is inflated out of it at runtime.
 resources/cloudflared/*/*
+resources/cloudflared/.prepared.json
 dist/

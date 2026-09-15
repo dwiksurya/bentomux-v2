@@ -42,6 +42,10 @@ serde_yaml = "0.9"
 toml = "0.8"
 # manifest rule matching (screen/line regexes)
 regex = "1"
+# cloudflared ships gzipped in the bundle and is inflated into the app cache on
+# first tunnel use (39.8 MB -> 20.3 MB on darwin-x86_64); already in the tree via
+# tauri-plugin-updater's zip feature, so this adds no new crates
+flate2 = "1"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 tauri-plugin-opener = "2"
