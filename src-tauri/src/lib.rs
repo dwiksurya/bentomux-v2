@@ -23,22 +23,21 @@ use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let process_start = std::time::Instant::now();
+    // Build AppStateManager before the Tauri Builder so it can be registered
+    // via builder.manage() — state is then available before WebView2
+    // initialises, making the Windows "state not managed" boot error impossible.
+    let app_state = state::AppStateManager::new(state::AppStateManager::pre_build_path());
     let mut builder = tauri::Builder::default();
     builder = builder
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
-        .plugin(tauri_plugin_opener::init());
+        .plugin(tauri_plugin_opener::init())
+        .manage(app_state);
     builder = builder.setup(move |app| {
         eprintln!("[perf] backend-ready-ms={}", process_start.elapsed().as_millis());
         use tauri::Emitter;
         use tauri::Manager;
         let handle = app.handle().clone();
-        // Manage state and pty immediately — before any other work — so the
-        // backend state is available the instant WebView2 (Windows) fires its
-        // first IPC call. On Windows, WebView2 can initialize fast enough to
-        // invoke `get_state` before a later `app.manage()` runs.
-        let state = state::AppStateManager::with_app_handle(&handle);
-        app.manage(state);
         let pty = pty::PtyManager::new(Some(handle.clone()));
         app.manage(pty);
         git::init_watch(handle.clone());

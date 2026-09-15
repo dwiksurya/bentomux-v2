@@ -257,6 +257,27 @@ pub struct AppStateManager {
 }
 
 impl AppStateManager {
+    /* Resolve the store path without a live AppHandle so state can be
+       managed on the Builder — before WebView2 initialises — eliminating
+       the race that causes the Windows "state not managed" boot error. */
+    pub fn pre_build_path() -> PathBuf {
+        #[cfg(target_os = "windows")]
+        let base = std::env::var_os("APPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."));
+        #[cfg(target_os = "macos")]
+        let base = std::env::var_os("HOME")
+            .map(|h| PathBuf::from(h).join("Library").join("Application Support"))
+            .unwrap_or_else(|| PathBuf::from("."));
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+        let base = std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local").join("share")))
+            .unwrap_or_else(|| PathBuf::from("."));
+        // Must match tauri.conf.json `identifier` → Tauri appends the identifier as the dir name.
+        base.join("app.bentomux.desktop").join("bentomux.json")
+    }
+
     /* wires the store to the Tauri app data dir (userData equivalent) */
     pub fn with_app_handle(app: &tauri::AppHandle) -> Self {
         use tauri::Manager;
