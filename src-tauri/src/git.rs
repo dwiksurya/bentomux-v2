@@ -9,6 +9,8 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::process::Command;
 use std::sync::Mutex;
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
 use std::time::Duration;
 use tauri::Emitter;
 
@@ -282,15 +284,18 @@ struct RunOutput {
 
 /* blocked git run with per-stream buffer cap + timeout; mirrors runProcess */
 fn run_process(cwd: &str, args: &[&str], timeout_ms: Option<u64>) -> Result<RunOutput, String> {
-    let mut child = Command::new("git")
-        .args(args)
+    #[allow(unused_mut)]
+    let mut cmd = Command::new("git");
+    cmd.args(args)
         .current_dir(cwd)
         .env("GIT_TERMINAL_PROMPT", "0")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("git spawn failed: {}", e))?;
+        .stderr(std::process::Stdio::piped());
+    /* suppress the brief console window flash on Windows */
+    #[cfg(target_os = "windows")]
+    cmd.creation_flags(0x0800_0000 /* CREATE_NO_WINDOW */);
+    let mut child = cmd.spawn().map_err(|e| format!("git spawn failed: {}", e))?;
 
     let timeout = Duration::from_millis(timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS));
     /* stdout/stderr configured as piped above, so take() always yields a stream */
