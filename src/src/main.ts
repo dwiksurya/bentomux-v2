@@ -75,7 +75,6 @@ function findTerminalEntry(route: Route): TabEntry | undefined {
 }
 
 function renderContentInner(route: Route): void {
-  console.log('[DEBUG main] renderContentInner called with route:', route);
   const c = $('#content');
   const body = $('#tabbody');
   c.classList.remove('full');
@@ -83,17 +82,11 @@ function renderContentInner(route: Route): void {
 
   if (route.view === 'terminal') {
     const entry = findTerminalEntry(route);
-    console.log('[DEBUG main] Terminal route, entry:', entry);
     const exists = !!entry || db.openTabs.some(t => t.id === route.tabId);
-    console.log('[DEBUG main] Terminal exists:', exists);
     c.classList.add('full');
     body.innerHTML = '';
     const start = entry && entry.route.view === 'terminal' ? (entry.tree ?? entry.route.tabId) : route.tabId;
-    console.log('[DEBUG main] start value:', start);
-    console.log('[DEBUG main] Calling terminalPage...');
     const result = terminalPage(start);
-    console.log('[DEBUG main] terminalPage returned:', result);
-    console.log('[DEBUG main] typeof result:', typeof result);
     body.append(exists ? result : h('div', { class: 'page' }, h('p', {}, 'Terminal not found.')));
   } else if (route.view === 'agents') {
     body.innerHTML = '';

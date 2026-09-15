@@ -87,7 +87,6 @@ export function applyTerminalFont(): void {
 export function initTerminalEvents(): void {
   parking = $('#termParking');
   window.bentomux.onPtyData((id, chunk) => {
-    console.log('[PTY DATA]', JSON.stringify(chunk));
     const live = lives.get(id);
 
     if (
@@ -111,9 +110,6 @@ export function initTerminalEvents(): void {
 function createXterm(tabId: string): { term: Terminal; fit: FitAddon; host: HTMLElement } {
   const fontFamily = monoFont();
   const fontSize = termFontSize();
-  console.log('[DEBUG createXterm] Creating xterm for tabId:', tabId);
-  console.log('[DEBUG createXterm] fontFamily:', fontFamily);
-  console.log('[DEBUG createXterm] fontSize:', fontSize);
   const term = new Terminal({
     theme: xtermTheme(),
     fontFamily,
@@ -126,23 +122,17 @@ function createXterm(tabId: string): { term: Terminal; fit: FitAddon; host: HTML
     scrollback: 1000,
     fastScrollSensitivity: 10,
   });
-  console.log('[DEBUG createXterm] Terminal instance created:', term);
   const fit = new FitAddon();
-  console.log('[DEBUG createXterm] FitAddon created');
   term.loadAddon(fit);
   term.loadAddon(new WebLinksAddon());
-  console.log('[DEBUG createXterm] Addons loaded');
   const host = h('div', { class: 'terminal-host', 'data-tab-id': tabId });
-  console.log('[DEBUG createXterm] Host div created:', host);
 
   // MUST call term.open() before term.element is available
   term.open(host);
-  console.log('[DEBUG createXterm] term.open() called, term.element:', term.element);
 
   wireXtermEvents(term, tabId);
   wireFocusIn(host, tabId);
   const result = { term, fit, host };
-  console.log('[DEBUG createXterm] Returning:', result);
   return result;
 }
 
@@ -269,17 +259,11 @@ function handleFileDrop(e: FileDropEvent): void {
 }
 
 function ensureLive(tabId: string): Live {
-  console.log('[DEBUG ensureLive] Called with tabId:', tabId);
   let live = lives.get(tabId);
   if (!live) {
-    console.log('[DEBUG ensureLive] Creating new terminal for:', tabId);
     const { term, fit, host } = createXterm(tabId);
-    console.log('[DEBUG ensureLive] createXterm returned - term:', term, 'fit:', fit, 'host:', host);
     live = { id: tabId, term, fit, host, observer: null };
     lives.set(tabId, live);
-    console.log('[DEBUG ensureLive] Live object created and stored:', live);
-  } else {
-    console.log('[DEBUG ensureLive] Found existing live for:', tabId, live);
   }
   return live;
 }
@@ -402,19 +386,13 @@ function mountAxis(parent: HTMLElement, node: PaneNode): HTMLElement {
 }
 
 export function terminalPage(start: PaneNode | string): HTMLElement {
-  console.log('[DEBUG terminalPage] Called with start:', start);
-  console.log('[DEBUG terminalPage] typeof start:', typeof start);
   try {
     const root = h('div', { class: 'terminal-page' });
-    console.log('[DEBUG terminalPage] root created:', root);
     const body = h('div', { class: 'mux-body' + (typeof start === 'string' ? '' : ' split') });
-    console.log('[DEBUG terminalPage] body created:', body);
     root.append(body);
 
     const ids = typeof start === 'string' ? [start] : leafIds(start);
-    console.log('[DEBUG terminalPage] ids:', ids);
     const pageLives = ids.map(id => ensureLive(id));
-    console.log('[DEBUG terminalPage] pageLives created:', pageLives.length);
 
     /* refresh palette in case the theme toggled since creation */
     for (const live of pageLives) {
@@ -423,11 +401,9 @@ export function terminalPage(start: PaneNode | string): HTMLElement {
     }
 
     if (typeof start === 'string') {
-      console.log('[DEBUG terminalPage] Single pane mode, appending host');
       body.append(pageLives[0].host); /* moves out of the parking lot */
       observe(body, pageLives[0]);
     } else {
-      console.log('[DEBUG terminalPage] Split mode, mounting axis');
       mountAxis(body, start);
     }
 
@@ -452,12 +428,10 @@ export function terminalPage(start: PaneNode | string): HTMLElement {
       paneMenu(e, ids);
     });
 
-    console.log('[DEBUG terminalPage] Returning root:', root);
     return root;
   } catch (error) {
     console.error('[terminalPage] Error creating terminal:', error);
     const errorDiv = h('div', { class: 'page' }, h('p', {}, 'Terminal error: ' + (error instanceof Error ? error.message : String(error))));
-    console.log('[DEBUG terminalPage] Returning error div:', errorDiv);
     return errorDiv;
   }
 }
